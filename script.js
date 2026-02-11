@@ -30,8 +30,10 @@ const tapAnimationsEl = document.getElementById('tap-animations');
 // Навигация
 const tapScreen = document.getElementById('tap-screen');
 const shopScreen = document.getElementById('shop-screen');
+const leaderboardScreen = document.getElementById('leaderboard-screen');
 const navTap = document.getElementById('nav-tap');
 const navShop = document.getElementById('nav-shop');
+const navLeaderboard = document.getElementById('nav-leaderboard');
 
 // Кнопки магазина
 const buyMultitapBtn = document.getElementById('buy-multitap');
@@ -42,7 +44,9 @@ const buySkinBtn = document.getElementById('buy-skin');
 // Загрузка данных пользователя
 async function loadUserData() {
     try {
-        const response = await fetch(`/api/user/${userId}`);
+        const username = initData?.user?.username || 'Аноним';
+        const firstName = initData?.user?.first_name || 'Игрок';
+        const response = await fetch(`/api/user/${userId}?username=${encodeURIComponent(username)}&first_name=${encodeURIComponent(firstName)}`);
         const data = await response.json();
         gameState = data;
         updateUI();
@@ -184,15 +188,29 @@ function debouncedSave() {
 navTap.addEventListener('click', () => {
     tapScreen.classList.add('active');
     shopScreen.classList.remove('active');
+    leaderboardScreen.classList.remove('active');
     navTap.classList.add('active');
     navShop.classList.remove('active');
+    navLeaderboard.classList.remove('active');
 });
 
 navShop.addEventListener('click', () => {
     shopScreen.classList.add('active');
     tapScreen.classList.remove('active');
+    leaderboardScreen.classList.remove('active');
     navShop.classList.add('active');
     navTap.classList.remove('active');
+    navLeaderboard.classList.remove('active');
+});
+
+navLeaderboard.addEventListener('click', () => {
+    leaderboardScreen.classList.add('active');
+    tapScreen.classList.remove('active');
+    shopScreen.classList.remove('active');
+    navLeaderboard.classList.add('active');
+    navTap.classList.remove('active');
+    navShop.classList.remove('active');
+    loadLeaderboard();
 });
 
 // Покупка мульти-тапа
@@ -240,6 +258,47 @@ buySkinBtn.addEventListener('click', () => {
         saveUserData();
     }
 });
+
+// Загрузка лидерборда
+async function loadLeaderboard() {
+    try {
+        const response = await fetch('/api/leaderboard');
+        const leaderboard = await response.json();
+        
+        const listEl = document.getElementById('leaderboard-list');
+        listEl.innerHTML = '';
+        
+        if (leaderboard.length === 0) {
+            listEl.innerHTML = '<div class="loading">Пока нет игроков</div>';
+            return;
+        }
+        
+        leaderboard.forEach((player, index) => {
+            const rank = index + 1;
+            const isYou = player.user_id === String(userId);
+            
+            let rankClass = '';
+            if (rank === 1) rankClass = 'top1';
+            else if (rank === 2) rankClass = 'top2';
+            else if (rank === 3) rankClass = 'top3';
+            
+            const item = document.createElement('div');
+            item.className = 'leaderboard-item' + (isYou ? ' leaderboard-you' : '');
+            item.innerHTML = `
+                <div class="leaderboard-rank ${rankClass}">${rank}</div>
+                <div class="leaderboard-info">
+                    <div class="leaderboard-name">${player.first_name}${isYou ? ' (Вы)' : ''}</div>
+                    <div class="leaderboard-stats">Уровень тапа: ${player.multi_tap_level}</div>
+                </div>
+                <div class="leaderboard-coins">${Math.floor(player.coins)} 🪙</div>
+            `;
+            listEl.appendChild(item);
+        });
+    } catch (error) {
+        console.error('Ошибка загрузки лидерборда:', error);
+        document.getElementById('leaderboard-list').innerHTML = '<div class="loading">Ошибка загрузки</div>';
+    }
+}
 
 // Инициализация при загрузке
 loadUserData();
