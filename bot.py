@@ -29,7 +29,7 @@ def save_users_data(data):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_user_data(user_id):
+def get_user_data(user_id, username=None, first_name=None):
     """Получить данные пользователя или создать новые"""
     users = load_users_data()
     user_id_str = str(user_id)
@@ -43,8 +43,17 @@ def get_user_data(user_id):
             "energy_level": 1,
             "auto_tap_level": 0,
             "skin_bought": False,
-            "last_update": 0
+            "last_update": 0,
+            "username": username or "Аноним",
+            "first_name": first_name or "Игрок"
         }
+        save_users_data(users)
+    else:
+        # Обновляем имя если изменилось
+        if username:
+            users[user_id_str]["username"] = username
+        if first_name:
+            users[user_id_str]["first_name"] = first_name
         save_users_data(users)
     
     return users[user_id_str]
@@ -72,7 +81,9 @@ routes = web.RouteTableDef()
 async def get_user(request):
     """Получить данные пользователя"""
     user_id = request.match_info['user_id']
-    data = get_user_data(user_id)
+    username = request.query.get('username')
+    first_name = request.query.get('first_name')
+    data = get_user_data(user_id, username, first_name)
     return web.json_response(data)
 
 @routes.post('/api/user/{user_id}')
@@ -86,6 +97,28 @@ async def update_user(request):
     save_users_data(users)
     
     return web.json_response({"status": "ok"})
+
+@routes.get('/api/leaderboard')
+async def get_leaderboard(request):
+    """Получить топ игроков"""
+    users = load_users_data()
+    
+    # Преобразуем в список и сортируем по монетам
+    leaderboard = []
+    for user_id, data in users.items():
+        leaderboard.append({
+            "user_id": user_id,
+            "username": data.get("username", "Аноним"),
+            "first_name": data.get("first_name", "Игрок"),
+            "coins": data.get("coins", 0),
+            "multi_tap_level": data.get("multi_tap_level", 1)
+        })
+    
+    # Сортируем по монетам (топ 100)
+    leaderboard.sort(key=lambda x: x["coins"], reverse=True)
+    leaderboard = leaderboard[:100]
+    
+    return web.json_response(leaderboard)
 
 @routes.get('/')
 async def index(request):
@@ -132,4 +165,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
