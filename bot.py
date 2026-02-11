@@ -54,14 +54,14 @@ async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text="🐹 Открыть игру",
+            text="🐹 Открыть Анара",
             web_app=WebAppInfo(url=WEBAPP_URL)
         )]
     ])
     
     await message.answer(
-        "🐹 Добро пожаловать в Hamster Tap!\n\n"
-        "Тапай по хомяку, зарабатывай монеты и прокачивай апгрейды!",
+        "Добро пожаловать в Анар тап!🐹🐹🐹\n\n"
+        "Тапай по ананисту и прокачивайся!",
         reply_markup=keyboard
     )
 
@@ -132,3 +132,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
