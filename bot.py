@@ -12,6 +12,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8510904775:AAEPqjsb2M3ckqzmnftrV_Ty5JcmMrAWD
 # URL где будет хоститься веб-приложение
 WEBAPP_URL = os.getenv("WEBAPP_URL", "YOUR_WEBAPP_URL_HERE")  # например https://yourdomain.com
 
+# ID администратора
+ADMIN_ID = 1254600026
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -151,6 +154,10 @@ def get_leaderboard():
         for row in rows
     ]
 
+def is_admin(user_id: int) -> bool:
+    """Проверка является ли пользователь админом"""
+    return user_id == ADMIN_ID
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
@@ -161,11 +168,265 @@ async def cmd_start(message: types.Message):
         )]
     ])
     
+    admin_text = ""
+    if is_admin(message.from_user.id):
+        admin_text = "\n\n👑 Админ-команды:\n/admin - панель управления"
+    
     await message.answer(
         "Добро пожаловать в Анар тап!🐹🐹🐹\n\n"
-        "Тапай по ананисту и прокачивайся!",
+        f"Тапай по ананисту и прокачивайся!{admin_text}",
         reply_markup=keyboard
     )
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    """Админ-панель"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой команде")
+        return
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Статистика
+    cursor.execute('SELECT COUNT(*) FROM users')
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT SUM(coins) FROM users')
+    total_coins = cursor.fetchone()[0] or 0
+    
+    cursor.execute('SELECT first_name, coins FROM users ORDER BY coins DESC LIMIT 1')
+    top_user = cursor.fetchone()
+    
+    conn.close()
+    
+    admin_text = (
+        "👑 АДМИН-ПАНЕЛЬ\n\n"
+        f"📊 Статистика:\n"
+        f"• Всего игроков: {total_users}\n"
+        f"• Всего монет: {int(total_coins)}\n"
+        f"• Топ игрок: {top_user[0] if top_user else 'Нет'} ({int(top_user[1]) if top_user else 0} монет)\n\n"
+        f"📝 Команды:\n"
+        f"/users - список всех пользователей\n"
+        f"/give [user_id] [монеты] - выдать монеты\n"
+        f"/reset [user_id] - сбросить прогресс\n"
+        f"/ban [user_id] - забанить пользователя\n"
+        f"/stats [user_id] - статистика игрока\n"
+        f"/broadcast [текст] - рассылка всем"
+    )
+    
+    await message.answer(admin_text)
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    """Список пользователей"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT user_id, first_name, coins, multi_tap_level
+        FROM users
+        ORDER BY coins DESC
+        LIMIT 50
+    ''')
+    
+    users = cursor.fetchall()
+    conn.close()
+    
+    if not users:
+        await message.answer("Пользователей пока нет")
+        return
+    
+    text = "👥 Топ-50 пользователей:\n\n"
+    for i, (user_id, name, coins, level) in enumerate(users, 1):
+        text += f"{i}. {name} (ID: {user_id})\n   💰 {int(coins)} монет | 👆 Ур.{level}\n\n"
+    
+    await message.answer(text)
+
+@dp.message(Command("give"))
+async def cmd_give(message: types.Message):
+    """Выдать монеты пользователю"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            await message.answer("Использование: /give [user_id] [монеты]")
+            return
+        
+        user_id = args[1]
+        coins = float(args[2])
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT coins, first_name FROM users WHERE user_id = ?', (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            await message.answer(f"❌ Пользователь {user_id} не найден")
+            conn.close()
+            return
+        
+        new_coins = user[0] + coins
+        cursor.execute('UPDATE users SET coins = ? WHERE user_id = ?', (new_coins, user_id))
+        conn.commit()
+        conn.close()
+        
+        await message.answer(
+            f"✅ Выдано {int(coins)} монет пользователю {user[1]}\n"
+            f"Было: {int(user[0])} → Стало: {int(new_coins)}"
+        )
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                int(user_id),
+                f"🎁 Вам начислено {int(coins)} монет от администратора!"
+            )
+        except:
+            pass
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("reset"))
+async def cmd_reset(message: types.Message):
+    """Сбросить прогресс пользователя"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("Использование: /reset [user_id]")
+            return
+        
+        user_id = args[1]
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT first_name FROM users WHERE user_id = ?', (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            await message.answer(f"❌ Пользователь {user_id} не найден")
+            conn.close()
+            return
+        
+        cursor.execute('''
+            UPDATE users SET
+                coins = 0,
+                energy = 1000,
+                max_energy = 1000,
+                multi_tap_level = 1,
+                energy_level = 1,
+                auto_tap_level = 0,
+                skin_bought = 0
+            WHERE user_id = ?
+        ''', (user_id,))
+        conn.commit()
+        conn.close()
+        
+        await message.answer(f"✅ Прогресс пользователя {user[0]} сброшен")
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                int(user_id),
+                "⚠️ Ваш прогресс был сброшен администратором"
+            )
+        except:
+            pass
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Статистика пользователя"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("Использование: /stats [user_id]")
+            return
+        
+        user_id = args[1]
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if not user:
+            await message.answer(f"❌ Пользователь {user_id} не найден")
+            return
+        
+        stats_text = (
+            f"📊 Статистика игрока\n\n"
+            f"👤 Имя: {user[10]}\n"
+            f"🆔 ID: {user[0]}\n"
+            f"💰 Монеты: {int(user[1])}\n"
+            f"⚡ Энергия: {int(user[2])}/{user[3]}\n"
+            f"👆 Мульти-тап: Ур.{user[4]}\n"
+            f"🔋 Энергия+: Ур.{user[5]}\n"
+            f"🤖 Авто-тап: Ур.{user[6]}\n"
+            f"🎨 Золотой скин: {'Да' if user[7] else 'Нет'}"
+        )
+        
+        await message.answer(stats_text)
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message):
+    """Рассылка всем пользователям"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        text = message.text.replace("/broadcast", "", 1).strip()
+        if not text:
+            await message.answer("Использование: /broadcast [текст сообщения]")
+            return
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users')
+        users = cursor.fetchall()
+        conn.close()
+        
+        success = 0
+        failed = 0
+        
+        status_msg = await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
+        
+        for (user_id,) in users:
+            try:
+                await bot.send_message(int(user_id), f"📢 Сообщение от администратора:\n\n{text}")
+                success += 1
+            except:
+                failed += 1
+        
+        await status_msg.edit_text(
+            f"✅ Рассылка завершена!\n\n"
+            f"Успешно: {success}\n"
+            f"Ошибок: {failed}"
+        )
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 # Веб-сервер для API
 routes = web.RouteTableDef()
