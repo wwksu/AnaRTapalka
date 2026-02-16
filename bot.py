@@ -1,7 +1,8 @@
 import asyncio
 import json
 import os
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
@@ -11,6 +12,8 @@ from aiohttp import web
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8510904775:AAEPqjsb2M3ckqzmnftrV_Ty5JcmMrAWDf4")
 # URL где будет хоститься веб-приложение
 WEBAPP_URL = os.getenv("WEBAPP_URL", "YOUR_WEBAPP_URL_HERE")  # например https://yourdomain.com
+# PostgreSQL URL (Render предоставит автоматически)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ID администратора
 ADMIN_ID = 1254600026
@@ -18,119 +21,200 @@ ADMIN_ID = 1254600026
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# База данных SQLite
-DB_FILE = "/opt/render/project/.data/users.db" if os.path.exists("/opt/render") else "users.db"
+def get_db_connection():
+    """Получить подключение к базе данных"""
+    if DATABASE_URL:
+        # PostgreSQL на Render
+        return psycopg2.connect(DATABASE_URL, sslmode='require')
+    else:
+        # Локально используем SQLite (для разработки)
+        import sqlite3
+        return sqlite3.connect("users.db")
 
 def init_db():
     """Инициализация базы данных"""
-    # Создаём папку если её нет
-    db_dir = os.path.dirname(DB_FILE)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-    
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            coins REAL DEFAULT 0,
-            energy REAL DEFAULT 1000,
-            max_energy INTEGER DEFAULT 1000,
-            multi_tap_level INTEGER DEFAULT 1,
-            energy_level INTEGER DEFAULT 1,
-            auto_tap_level INTEGER DEFAULT 0,
-            skin_bought INTEGER DEFAULT 0,
-            last_update INTEGER DEFAULT 0,
-            username TEXT DEFAULT 'Аноним',
-            first_name TEXT DEFAULT 'Игрок'
-        )
-    ''')
+    
+    if DATABASE_URL:
+        # PostgreSQL
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                coins REAL DEFAULT 0,
+                energy REAL DEFAULT 1000,
+                max_energy INTEGER DEFAULT 1000,
+                multi_tap_level INTEGER DEFAULT 1,
+                energy_level INTEGER DEFAULT 1,
+                auto_tap_level INTEGER DEFAULT 0,
+                skin_bought BOOLEAN DEFAULT FALSE,
+                last_update BIGINT DEFAULT 0,
+                username TEXT DEFAULT 'Аноним',
+                first_name TEXT DEFAULT 'Игрок'
+            )
+        ''')
+    else:
+        # SQLite
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                coins REAL DEFAULT 0,
+                energy REAL DEFAULT 1000,
+                max_energy INTEGER DEFAULT 1000,
+                multi_tap_level INTEGER DEFAULT 1,
+                energy_level INTEGER DEFAULT 1,
+                auto_tap_level INTEGER DEFAULT 0,
+                skin_bought INTEGER DEFAULT 0,
+                last_update INTEGER DEFAULT 0,
+                username TEXT DEFAULT 'Аноним',
+                first_name TEXT DEFAULT 'Игрок'
+            )
+        ''')
+    
     conn.commit()
     conn.close()
+    print("База данных инициализирована")
 
 def get_user_data(user_id, username=None, first_name=None):
     """Получить данные пользователя или создать новые"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (str(user_id),))
+    cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
     row = cursor.fetchone()
     
     if row is None:
         # Создаём нового пользователя
-        cursor.execute('''
-            INSERT INTO users (user_id, username, first_name)
-            VALUES (?, ?, ?)
-        ''', (str(user_id), username or 'Аноним', first_name or 'Игрок'))
+        if DATABASE_URL:
+            cursor.execute('''
+                INSERT INTO users (user_id, username, first_name)
+                VALUES (%s, %s, %s)
+            ''', (str(user_id), username or 'Аноним', first_name or 'Игрок'))
+        else:
+            cursor.execute('''
+                INSERT INTO users (user_id, username, first_name)
+                VALUES (?, ?, ?)
+            ''', (str(user_id), username or 'Аноним', first_name or 'Игрок'))
         conn.commit()
         
         # Получаем созданного пользователя
-        cursor.execute('SELECT * FROM users WHERE user_id = ?', (str(user_id),))
+        cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
         row = cursor.fetchone()
     else:
         # Обновляем имя если изменилось
         if username or first_name:
-            cursor.execute('''
-                UPDATE users SET username = ?, first_name = ?
-                WHERE user_id = ?
-            ''', (username or row[9], first_name or row[10], str(user_id)))
+            if DATABASE_URL:
+                cursor.execute('''
+                    UPDATE users SET username = %s, first_name = %s
+                    WHERE user_id = %s
+                ''', (username or row[9], first_name or row[10], str(user_id)))
+            else:
+                cursor.execute('''
+                    UPDATE users SET username = ?, first_name = ?
+                    WHERE user_id = ?
+                ''', (username or row[9], first_name or row[10], str(user_id)))
             conn.commit()
-            cursor.execute('SELECT * FROM users WHERE user_id = ?', (str(user_id),))
+            cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
             row = cursor.fetchone()
     
     conn.close()
     
-    return {
-        "coins": row[1],
-        "energy": row[2],
-        "max_energy": row[3],
-        "multi_tap_level": row[4],
-        "energy_level": row[5],
-        "auto_tap_level": row[6],
-        "skin_bought": bool(row[7]),
-        "last_update": row[8],
-        "username": row[9],
-        "first_name": row[10]
-    }
+    # Преобразуем в словарь
+    if DATABASE_URL:
+        # PostgreSQL возвращает кортеж
+        return {
+            "coins": float(row[1]),
+            "energy": float(row[2]),
+            "max_energy": int(row[3]),
+            "multi_tap_level": int(row[4]),
+            "energy_level": int(row[5]),
+            "auto_tap_level": int(row[6]),
+            "skin_bought": bool(row[7]),
+            "last_update": int(row[8]),
+            "username": row[9],
+            "first_name": row[10]
+        }
+    else:
+        # SQLite
+        return {
+            "coins": row[1],
+            "energy": row[2],
+            "max_energy": row[3],
+            "multi_tap_level": row[4],
+            "energy_level": row[5],
+            "auto_tap_level": row[6],
+            "skin_bought": bool(row[7]),
+            "last_update": row[8],
+            "username": row[9],
+            "first_name": row[10]
+        }
 
 def save_user_data(user_id, data):
     """Сохранить данные пользователя"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('''
-        UPDATE users SET
-            coins = ?,
-            energy = ?,
-            max_energy = ?,
-            multi_tap_level = ?,
-            energy_level = ?,
-            auto_tap_level = ?,
-            skin_bought = ?,
-            last_update = ?,
-            username = ?,
-            first_name = ?
-        WHERE user_id = ?
-    ''', (
-        data.get('coins', 0),
-        data.get('energy', 1000),
-        data.get('max_energy', 1000),
-        data.get('multi_tap_level', 1),
-        data.get('energy_level', 1),
-        data.get('auto_tap_level', 0),
-        int(data.get('skin_bought', False)),
-        data.get('last_update', 0),
-        data.get('username', 'Аноним'),
-        data.get('first_name', 'Игрок'),
-        str(user_id)
-    ))
+    if DATABASE_URL:
+        cursor.execute('''
+            UPDATE users SET
+                coins = %s,
+                energy = %s,
+                max_energy = %s,
+                multi_tap_level = %s,
+                energy_level = %s,
+                auto_tap_level = %s,
+                skin_bought = %s,
+                last_update = %s,
+                username = %s,
+                first_name = %s
+            WHERE user_id = %s
+        ''', (
+            data.get('coins', 0),
+            data.get('energy', 1000),
+            data.get('max_energy', 1000),
+            data.get('multi_tap_level', 1),
+            data.get('energy_level', 1),
+            data.get('auto_tap_level', 0),
+            data.get('skin_bought', False),
+            data.get('last_update', 0),
+            data.get('username', 'Аноним'),
+            data.get('first_name', 'Игрок'),
+            str(user_id)
+        ))
+    else:
+        cursor.execute('''
+            UPDATE users SET
+                coins = ?,
+                energy = ?,
+                max_energy = ?,
+                multi_tap_level = ?,
+                energy_level = ?,
+                auto_tap_level = ?,
+                skin_bought = ?,
+                last_update = ?,
+                username = ?,
+                first_name = ?
+            WHERE user_id = ?
+        ''', (
+            data.get('coins', 0),
+            data.get('energy', 1000),
+            data.get('max_energy', 1000),
+            data.get('multi_tap_level', 1),
+            data.get('energy_level', 1),
+            data.get('auto_tap_level', 0),
+            int(data.get('skin_bought', False)),
+            data.get('last_update', 0),
+            data.get('username', 'Аноним'),
+            data.get('first_name', 'Игрок'),
+            str(user_id)
+        ))
     
     conn.commit()
     conn.close()
 
 def get_leaderboard():
     """Получить топ игроков"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -148,8 +232,8 @@ def get_leaderboard():
             "user_id": row[0],
             "username": row[1],
             "first_name": row[2],
-            "coins": row[3],
-            "multi_tap_level": row[4]
+            "coins": float(row[3]),
+            "multi_tap_level": int(row[4])
         }
         for row in rows
     ]
@@ -185,7 +269,7 @@ async def cmd_admin(message: types.Message):
         await message.answer("❌ У вас нет доступа к этой команде")
         return
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # Статистика
@@ -204,8 +288,8 @@ async def cmd_admin(message: types.Message):
         "👑 АДМИН-ПАНЕЛЬ\n\n"
         f"📊 Статистика:\n"
         f"• Всего игроков: {total_users}\n"
-        f"• Всего монет: {int(total_coins)}\n"
-        f"• Топ игрок: {top_user[0] if top_user else 'Нет'} ({int(top_user[1]) if top_user else 0} монет)\n\n"
+        f"• Всего монет: {int(float(total_coins))}\n"
+        f"• Топ игрок: {top_user[0] if top_user else 'Нет'} ({int(float(top_user[1])) if top_user else 0} монет)\n\n"
         f"📝 Команды:\n"
         f"/users - список всех пользователей\n"
         f"/give [user_id] [монеты] - выдать монеты\n"
@@ -223,7 +307,7 @@ async def cmd_users(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -242,7 +326,7 @@ async def cmd_users(message: types.Message):
     
     text = "👥 Топ-50 пользователей:\n\n"
     for i, (user_id, name, coins, level) in enumerate(users, 1):
-        text += f"{i}. {name} (ID: {user_id})\n   💰 {int(coins)} монет | 👆 Ур.{level}\n\n"
+        text += f"{i}. {name} (ID: {user_id})\n   💰 {int(float(coins))} монет | 👆 Ур.{level}\n\n"
     
     await message.answer(text)
 
@@ -261,10 +345,10 @@ async def cmd_give(message: types.Message):
         user_id = args[1]
         coins = float(args[2])
         
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute('SELECT coins, first_name FROM users WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT coins, first_name FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT coins, first_name FROM users WHERE user_id = ?', (user_id,))
         user = cursor.fetchone()
         
         if not user:
@@ -272,14 +356,14 @@ async def cmd_give(message: types.Message):
             conn.close()
             return
         
-        new_coins = user[0] + coins
-        cursor.execute('UPDATE users SET coins = ? WHERE user_id = ?', (new_coins, user_id))
+        new_coins = float(user[0]) + coins
+        cursor.execute('UPDATE users SET coins = %s WHERE user_id = %s' if DATABASE_URL else 'UPDATE users SET coins = ? WHERE user_id = ?', (new_coins, user_id))
         conn.commit()
         conn.close()
         
         await message.answer(
             f"✅ Выдано {int(coins)} монет пользователю {user[1]}\n"
-            f"Было: {int(user[0])} → Стало: {int(new_coins)}"
+            f"Было: {int(float(user[0]))} → Стало: {int(new_coins)}"
         )
         
         # Уведомляем пользователя
@@ -308,10 +392,10 @@ async def cmd_reset(message: types.Message):
         
         user_id = args[1]
         
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute('SELECT first_name FROM users WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT first_name FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT first_name FROM users WHERE user_id = ?', (user_id,))
         user = cursor.fetchone()
         
         if not user:
@@ -319,17 +403,30 @@ async def cmd_reset(message: types.Message):
             conn.close()
             return
         
-        cursor.execute('''
-            UPDATE users SET
-                coins = 0,
-                energy = 1000,
-                max_energy = 1000,
-                multi_tap_level = 1,
-                energy_level = 1,
-                auto_tap_level = 0,
-                skin_bought = 0
-            WHERE user_id = ?
-        ''', (user_id,))
+        if DATABASE_URL:
+            cursor.execute('''
+                UPDATE users SET
+                    coins = 0,
+                    energy = 1000,
+                    max_energy = 1000,
+                    multi_tap_level = 1,
+                    energy_level = 1,
+                    auto_tap_level = 0,
+                    skin_bought = FALSE
+                WHERE user_id = %s
+            ''', (user_id,))
+        else:
+            cursor.execute('''
+                UPDATE users SET
+                    coins = 0,
+                    energy = 1000,
+                    max_energy = 1000,
+                    multi_tap_level = 1,
+                    energy_level = 1,
+                    auto_tap_level = 0,
+                    skin_bought = 0
+                WHERE user_id = ?
+            ''', (user_id,))
         conn.commit()
         conn.close()
         
@@ -361,10 +458,10 @@ async def cmd_stats(message: types.Message):
         
         user_id = args[1]
         
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (user_id,))
         user = cursor.fetchone()
         conn.close()
         
@@ -376,8 +473,8 @@ async def cmd_stats(message: types.Message):
             f"📊 Статистика игрока\n\n"
             f"👤 Имя: {user[10]}\n"
             f"🆔 ID: {user[0]}\n"
-            f"💰 Монеты: {int(user[1])}\n"
-            f"⚡ Энергия: {int(user[2])}/{user[3]}\n"
+            f"💰 Монеты: {int(float(user[1]))}\n"
+            f"⚡ Энергия: {int(float(user[2]))}/{user[3]}\n"
             f"👆 Мульти-тап: Ур.{user[4]}\n"
             f"🔋 Энергия+: Ур.{user[5]}\n"
             f"🤖 Авто-тап: Ур.{user[6]}\n"
@@ -401,7 +498,7 @@ async def cmd_broadcast(message: types.Message):
             await message.answer("Использование: /broadcast [текст сообщения]")
             return
         
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT user_id FROM users')
         users = cursor.fetchall()
