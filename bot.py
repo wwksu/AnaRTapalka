@@ -50,7 +50,8 @@ def init_db():
                 skin_bought BOOLEAN DEFAULT FALSE,
                 last_update BIGINT DEFAULT 0,
                 username TEXT DEFAULT 'Аноним',
-                first_name TEXT DEFAULT 'Игрок'
+                first_name TEXT DEFAULT 'Игрок',
+                ban_end_time BIGINT DEFAULT 0
             )
         ''')
     else:
@@ -67,7 +68,8 @@ def init_db():
                 skin_bought INTEGER DEFAULT 0,
                 last_update INTEGER DEFAULT 0,
                 username TEXT DEFAULT 'Аноним',
-                first_name TEXT DEFAULT 'Игрок'
+                first_name TEXT DEFAULT 'Игрок',
+                ban_end_time INTEGER DEFAULT 0
             )
         ''')
     
@@ -132,7 +134,8 @@ def get_user_data(user_id, username=None, first_name=None):
             "skin_bought": bool(row[7]),
             "last_update": int(row[8]),
             "username": row[9],
-            "first_name": row[10]
+            "first_name": row[10],
+            "ban_end_time": int(row[11]) if len(row) > 11 else 0
         }
     else:
         # SQLite
@@ -146,7 +149,8 @@ def get_user_data(user_id, username=None, first_name=None):
             "skin_bought": bool(row[7]),
             "last_update": row[8],
             "username": row[9],
-            "first_name": row[10]
+            "first_name": row[10],
+            "ban_end_time": row[11] if len(row) > 11 else 0
         }
 
 def save_user_data(user_id, data):
@@ -166,7 +170,8 @@ def save_user_data(user_id, data):
                 skin_bought = %s,
                 last_update = %s,
                 username = %s,
-                first_name = %s
+                first_name = %s,
+                ban_end_time = %s
             WHERE user_id = %s
         ''', (
             data.get('coins', 0),
@@ -179,6 +184,7 @@ def save_user_data(user_id, data):
             data.get('last_update', 0),
             data.get('username', 'Аноним'),
             data.get('first_name', 'Игрок'),
+            data.get('ban_end_time', 0),
             str(user_id)
         ))
     else:
@@ -193,7 +199,8 @@ def save_user_data(user_id, data):
                 skin_bought = ?,
                 last_update = ?,
                 username = ?,
-                first_name = ?
+                first_name = ?,
+                ban_end_time = ?
             WHERE user_id = ?
         ''', (
             data.get('coins', 0),
@@ -206,6 +213,7 @@ def save_user_data(user_id, data):
             data.get('last_update', 0),
             data.get('username', 'Аноним'),
             data.get('first_name', 'Игрок'),
+            data.get('ban_end_time', 0),
             str(user_id)
         ))
     
