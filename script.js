@@ -118,10 +118,37 @@ function updateShopUI() {
         buySkinBtn.disabled = gameState.coins < 1000;
     }
 }
+let clickTimes = [];
+const MAX_CLICKS_PER_SECOND = 20;
 
+// Функция проверки автокликера
+function checkAutoClicker() {
+    const now = Date.now();
+    
+    // Добавляем текущее время клика
+    clickTimes.push(now);
+    
+    // Удаляем клики старше 1 секунды
+    clickTimes = clickTimes.filter(time => now - time < 1000);
+    
+    // Проверяем количество кликов за последнюю секунду
+    if (clickTimes.length > MAX_CLICKS_PER_SECOND) {
+        // Показываем предупреждение
+        alert('⚠️ Autoclicker запрещен!');
+        
+        // Опционально: можно заблокировать тапы на несколько секунд
+        clickTimes = [];
+        return false;
+    }
+    
+    return true;
+}
 // Тап по хомяку
 hamsterEl.addEventListener('click', (e) => {
     if (gameState.energy < 1) return;
+    if(!checkAutoClicker()){
+        return;
+}
     
     // Уменьшаем энергию
     gameState.energy -= 1;
@@ -302,6 +329,7 @@ async function loadLeaderboard() {
 
 // Инициализация при загрузке
 loadUserData();
+
 
 
 
