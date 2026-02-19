@@ -21,14 +21,12 @@ AUTOCLICK_BAN_MS = 2 * 60 * 1000
 AUTH_MAX_AGE_SECONDS = 24 * 60 * 60
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is required")
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1254600026"))
 
-bot = Bot(token=BOT_TOKEN)
+bot = None
 dp = Dispatcher()
 PG_POOL = None
 
@@ -64,6 +62,7 @@ def init_db():
             maxconn=int(os.getenv("DB_POOL_MAX", "20")),
             dsn=DATABASE_URL,
             sslmode="require",
+            connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
         )
 
     conn = get_db_connection()
@@ -985,14 +984,36 @@ async def start_web_server():
     print(f"Веб-сервер запущен на порту {port}")
 
 
+async def ensure_db_ready():
+    while True:
+        try:
+            await asyncio.to_thread(init_db)
+            print("База данных инициализирована")
+            return
+        except Exception as e:
+            print(f"Ошибка инициализации БД: {e}. Повтор через 5 сек.")
+            await asyncio.sleep(5)
+
+
 async def main():
-    init_db()
-    print("База данных инициализирована")
-
     await start_web_server()
+    await ensure_db_ready()
 
+    if not BOT_TOKEN:
+        print("BOT_TOKEN не задан. Веб-сервер работает, но бот не запущен.")
+        while True:
+            await asyncio.sleep(3600)
+
+    global bot
+    bot = Bot(token=BOT_TOKEN)
     print("Бот запущен")
-    await dp.start_polling(bot)
+    while True:
+        try:
+            await dp.start_polling(bot)
+            break
+        except Exception as e:
+            print(f"Ошибка polling: {e}. Повтор через 5 сек.")
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
