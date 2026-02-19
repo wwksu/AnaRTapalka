@@ -16,7 +16,8 @@ let gameState = {
     energy_level: 1,
     auto_tap_level: 0,
     skin_bought: false,
-    last_update: Date.now()
+    last_update: Date.now(),
+    ban_end_time: 0
 };
 
 // Элементы DOM
@@ -120,7 +121,6 @@ function updateShopUI() {
 }
 let clickTimes = [];
 const MAX_CLICKS_PER_SECOND = 20;
-let banEndTime = 0;
 const BAN_DURATION = 2 * 60 * 1000; // 2 минуты в миллисекундах
 
 // Функция проверки автокликера
@@ -128,8 +128,8 @@ function checkAutoClicker() {
     const now = Date.now();
     
     // Проверяем, не забанен ли игрок
-    if (banEndTime > now) {
-        const remainingTime = Math.ceil((banEndTime - now) / 1000);
+    if (gameState.ban_end_time > now) {
+        const remainingTime = Math.ceil((gameState.ban_end_time - now) / 1000);
         const minutes = Math.floor(remainingTime / 60);
         const seconds = remainingTime % 60;
         const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
@@ -147,8 +147,11 @@ function checkAutoClicker() {
     // Проверяем количество кликов за последнюю секунду
     if (clickTimes.length > MAX_CLICKS_PER_SECOND) {
         // Выдаем бан на 2 минуты
-        banEndTime = now + BAN_DURATION;
+        gameState.ban_end_time = now + BAN_DURATION;
         clickTimes = [];
+        
+        // Сохраняем бан в базу данных
+        saveUserData();
         
         alert(`⚠️ Autoclicker запрещен!\nВремя блокировки: 2:00`);
         return false;
@@ -342,7 +345,6 @@ async function loadLeaderboard() {
 
 // Инициализация при загрузке
 loadUserData();
-
 
 
 
