@@ -110,13 +110,13 @@ async function loadUserData() {
     }
 }
 
-async function performAction(action) {
+async function performAction(action, extra = {}) {
     if (!userId || !initDataRaw) {
         return null;
     }
 
     try {
-        const result = await apiPost(`/api/action/${encodeURIComponent(userId)}`, { action });
+        const result = await apiPost(`/api/action/${encodeURIComponent(userId)}`, { action, ...extra });
         if (result?.data) {
             setGameState(result.data);
         }
@@ -228,30 +228,75 @@ function showBanAlert(banEndTime) {
     alert(`⛔ Вы временно заблокированы за слишком быстрые клики. Осталось: ${minutes}:${String(seconds).padStart(2, "0")}`);
 }
 
-let tapInFlight = false;
-hamsterEl.addEventListener("click", async (e) => {
-    if (tapInFlight) {
+const TAP_BATCH_INTERVAL_MS = 120;
+let pendingTaps = 0;
+let tapBatchInFlight = false;
+let tapBatchTimer = null;
+let lastBanAlertAt = 0;
+
+async function flushTapBatch() {
+    if (tapBatchInFlight || pendingTaps <= 0) {
         return;
     }
 
-    tapInFlight = true;
-    const result = await performAction("tap");
-    tapInFlight = false;
+    tapBatchInFlight = true;
+    const batchCount = pendingTaps;
+    pendingTaps = 0;
+
+    const result = await performAction("tap_batch", { count: batchCount });
+    tapBatchInFlight = false;
 
     if (!result || !result.event) {
+        pendingTaps = Math.min(100, pendingTaps + batchCount);
+        queueTapFlush(TAP_BATCH_INTERVAL_MS);
         return;
     }
 
-    if (result.event.status === "ok") {
-        const amount = result.event.coins_earned || 0;
-        if (result.event.is_combo) {
-            createComboAnimation(e, amount);
-        } else {
-            createTapAnimation(e, amount);
+    if (result.event.status === "banned") {
+        const now = Date.now();
+        if (now - lastBanAlertAt > 1500) {
+            showBanAlert(result.event.ban_end_time || gameState.ban_end_time);
+            lastBanAlertAt = now;
         }
-    } else if (result.event.status === "banned") {
-        showBanAlert(result.event.ban_end_time || gameState.ban_end_time);
+        pendingTaps = 0;
+        return;
     }
+
+    if (pendingTaps > 0) {
+        queueTapFlush(0);
+    }
+}
+
+function queueTapFlush(delay = TAP_BATCH_INTERVAL_MS) {
+    if (tapBatchTimer) {
+        return;
+    }
+    tapBatchTimer = setTimeout(async () => {
+        tapBatchTimer = null;
+        await flushTapBatch();
+    }, delay);
+}
+
+hamsterEl.addEventListener("click", (e) => {
+    if (gameState.ban_end_time > Date.now()) {
+        const now = Date.now();
+        if (now - lastBanAlertAt > 1500) {
+            showBanAlert(gameState.ban_end_time);
+            lastBanAlertAt = now;
+        }
+        return;
+    }
+
+    if (gameState.energy < 1) {
+        return;
+    }
+
+    gameState.energy = Math.max(0, gameState.energy - 1);
+    createTapAnimation(e, gameState.multi_tap_level);
+    updateUI();
+
+    pendingTaps += 1;
+    queueTapFlush();
 });
 
 navTap.addEventListener("click", () => {
