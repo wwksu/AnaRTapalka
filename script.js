@@ -92,7 +92,7 @@ function updateUI() {
 // Обновление UI магазина
 function updateShopUI() {
     // Мульти-тап
-    const multitapPrice = 100 * Math.pow(2, gameState.multi_tap_level - 1);
+    const multitapPrice = 100 * Math.pow(1.2, gameState.multi_tap_level - 1);
     document.getElementById('multitap-level').textContent = gameState.multi_tap_level;
     document.getElementById('multitap-price').textContent = multitapPrice;
     buyMultitapBtn.disabled = gameState.coins < multitapPrice;
@@ -302,3 +302,4 @@ async function loadLeaderboard() {
 
 // Инициализация при загрузке
 loadUserData();
+
