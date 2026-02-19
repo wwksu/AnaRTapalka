@@ -1,44 +1,54 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import os
+import random
+import sqlite3
+import time
+from urllib.parse import parse_qsl
+
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiohttp import web
 
-# Токен бота - замени на свой (или используй переменную окружения для деплоя)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-# URL где будет хоститься веб-приложение
-WEBAPP_URL = os.getenv("WEBAPP_URL", "YOUR_WEBAPP_URL_HERE")  # например https://yourdomain.com
-# PostgreSQL URL (Render предоставит автоматически)
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Security and gameplay constants
+MAX_CLICKS_PER_SECOND = 20
+AUTOCLICK_BAN_MS = 2 * 60 * 1000
+AUTH_MAX_AGE_SECONDS = 24 * 60 * 60
 
-# ID администратора
-ADMIN_ID = 1254600026
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required")
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1254600026"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+
 def get_db_connection():
-    """Получить подключение к базе данных"""
     if DATABASE_URL:
-        # PostgreSQL на Render
-        return psycopg2.connect(DATABASE_URL, sslmode='require')
-    else:
-        # Локально используем SQLite (для разработки)
-        import sqlite3
-        return sqlite3.connect("users.db")
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return sqlite3.connect("users.db")
+
+
+def _sqlite_column_exists(cursor, table_name: str, column_name: str) -> bool:
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return any(row[1] == column_name for row in cursor.fetchall())
+
 
 def init_db():
-    """Инициализация базы данных"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    
+
     if DATABASE_URL:
-        # PostgreSQL
-        cursor.execute('''
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
                 coins REAL DEFAULT 0,
@@ -51,19 +61,18 @@ def init_db():
                 last_update BIGINT DEFAULT 0,
                 username TEXT DEFAULT 'Аноним',
                 first_name TEXT DEFAULT 'Игрок',
-                ban_end_time BIGINT DEFAULT 0
+                ban_end_time BIGINT DEFAULT 0,
+                tap_window_start BIGINT DEFAULT 0,
+                tap_count INTEGER DEFAULT 0
             )
-        ''')
-        # Добавляем колонку ban_end_time если её нет
-        try:
-            cursor.execute('ALTER TABLE users ADD COLUMN ban_end_time BIGINT DEFAULT 0')
-            conn.commit()
-            print("Добавлена колонка ban_end_time в PostgreSQL")
-        except:
-            pass  # Колонка уже существует
+            """
+        )
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_end_time BIGINT DEFAULT 0")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tap_window_start BIGINT DEFAULT 0")
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tap_count INTEGER DEFAULT 0")
     else:
-        # SQLite
-        cursor.execute('''
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
                 coins REAL DEFAULT 0,
@@ -76,120 +85,71 @@ def init_db():
                 last_update INTEGER DEFAULT 0,
                 username TEXT DEFAULT 'Аноним',
                 first_name TEXT DEFAULT 'Игрок',
-                ban_end_time INTEGER DEFAULT 0
+                ban_end_time INTEGER DEFAULT 0,
+                tap_window_start INTEGER DEFAULT 0,
+                tap_count INTEGER DEFAULT 0
             )
-        ''')
-        # Добавляем колонку ban_end_time если её нет
-        try:
-            cursor.execute('ALTER TABLE users ADD COLUMN ban_end_time INTEGER DEFAULT 0')
-            conn.commit()
-            print("Добавлена колонка ban_end_time в SQLite")
-        except:
-            pass  # Колонка уже существует
-    
+            """
+        )
+        if not _sqlite_column_exists(cursor, "users", "ban_end_time"):
+            cursor.execute("ALTER TABLE users ADD COLUMN ban_end_time INTEGER DEFAULT 0")
+        if not _sqlite_column_exists(cursor, "users", "tap_window_start"):
+            cursor.execute("ALTER TABLE users ADD COLUMN tap_window_start INTEGER DEFAULT 0")
+        if not _sqlite_column_exists(cursor, "users", "tap_count"):
+            cursor.execute("ALTER TABLE users ADD COLUMN tap_count INTEGER DEFAULT 0")
+
     conn.commit()
     conn.close()
-    print("База данных инициализирована")
 
-def get_user_data(user_id, username=None, first_name=None):
-    """Получить данные пользователя или создать новые"""
-    import time
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
-    row = cursor.fetchone()
+def _fetch_user_row(cursor, user_id: str):
+    query = "SELECT * FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT * FROM users WHERE user_id = ?"
+    cursor.execute(query, (user_id,))
+    return cursor.fetchone()
 
-    if row is None:
-        # Создаём нового пользователя
-        if DATABASE_URL:
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name)
-                VALUES (%s, %s, %s)
-            ''', (str(user_id), username or 'Аноним', first_name or 'Игрок'))
-        else:
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name)
-                VALUES (?, ?, ?)
-            ''', (str(user_id), username or 'Аноним', first_name or 'Игрок'))
-        conn.commit()
 
-        # Получаем созданного пользователя
-        cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
-        row = cursor.fetchone()
-    else:
-        # Обновляем имя если изменилось
-        if username or first_name:
-            if DATABASE_URL:
-                cursor.execute('''
-                    UPDATE users SET username = %s, first_name = %s
-                    WHERE user_id = %s
-                ''', (username or row[9], first_name or row[10], str(user_id)))
-            else:
-                cursor.execute('''
-                    UPDATE users SET username = ?, first_name = ?
-                    WHERE user_id = ?
-                ''', (username or row[9], first_name or row[10], str(user_id)))
-            conn.commit()
-            cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
-            row = cursor.fetchone()
-
-    # Преобразуем в словарь
+def _insert_user(cursor, user_id: str, username: str, first_name: str):
     if DATABASE_URL:
-        # PostgreSQL возвращает кортеж
-        data = {
-            "coins": float(row[1]),
-            "energy": float(row[2]),
-            "max_energy": int(row[3]),
-            "multi_tap_level": int(row[4]),
-            "energy_level": int(row[5]),
-            "auto_tap_level": int(row[6]),
-            "skin_bought": bool(row[7]),
-            "last_update": int(row[8]),
-            "username": row[9],
-            "first_name": row[10],
-            "ban_end_time": int(row[11]) if len(row) > 11 else 0
-        }
+        cursor.execute(
+            """
+            INSERT INTO users (user_id, username, first_name, last_update)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            (user_id, username, first_name, int(time.time() * 1000)),
+        )
     else:
-        # SQLite
-        data = {
-            "coins": row[1],
-            "energy": row[2],
-            "max_energy": row[3],
-            "multi_tap_level": row[4],
-            "energy_level": row[5],
-            "auto_tap_level": row[6],
-            "skin_bought": bool(row[7]),
-            "last_update": row[8],
-            "username": row[9],
-            "first_name": row[10],
-            "ban_end_time": row[11] if len(row) > 11 else 0
-        }
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO users (user_id, username, first_name, last_update)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, username, first_name, int(time.time() * 1000)),
+        )
 
-    conn.close()
 
-    # Рассчитываем восстановление энергии и монет за время отсутствия
-    current_time = int(time.time() * 1000)  # в миллисекундах
-    last_update = data.get('last_update', 0)
-    
-    if last_update > 0:
-        elapsed_seconds = (current_time - last_update) / 1000
-        
-        # Восстановление энергии (1 в секунду)
-        if elapsed_seconds > 0:
-            data['energy'] = min(data['energy'] + elapsed_seconds, data['max_energy'])
-        
-        # Авто-тап (пассивный доход)
-        auto_tap_level = data.get('auto_tap_level', 0)
-        if auto_tap_level > 0:
-            data['coins'] += auto_tap_level * elapsed_seconds
+def _row_to_data(row):
+    return {
+        "coins": float(row[1]),
+        "energy": float(row[2]),
+        "max_energy": int(row[3]),
+        "multi_tap_level": int(row[4]),
+        "energy_level": int(row[5]),
+        "auto_tap_level": int(row[6]),
+        "skin_bought": bool(row[7]),
+        "last_update": int(row[8]),
+        "username": row[9] or "Аноним",
+        "first_name": row[10] or "Игрок",
+        "ban_end_time": int(row[11]) if len(row) > 11 else 0,
+        "tap_window_start": int(row[12]) if len(row) > 12 else 0,
+        "tap_count": int(row[13]) if len(row) > 13 else 0,
+    }
 
-    # Обновляем last_update и сохраняем (напрямую через SQL, чтобы избежать рекурсии)
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
+
+def _save_user(cursor, user_id: str, data: dict):
     if DATABASE_URL:
-        cursor.execute('''
+        cursor.execute(
+            """
             UPDATE users SET
                 coins = %s,
                 energy = %s,
@@ -201,24 +161,31 @@ def get_user_data(user_id, username=None, first_name=None):
                 last_update = %s,
                 username = %s,
                 first_name = %s,
-                ban_end_time = %s
+                ban_end_time = %s,
+                tap_window_start = %s,
+                tap_count = %s
             WHERE user_id = %s
-        ''', (
-            data.get('coins', 0),
-            data.get('energy', 1000),
-            data.get('max_energy', 1000),
-            data.get('multi_tap_level', 1),
-            data.get('energy_level', 1),
-            data.get('auto_tap_level', 0),
-            data.get('skin_bought', False),
-            current_time,
-            data.get('username', 'Аноним'),
-            data.get('first_name', 'Игрок'),
-            data.get('ban_end_time', 0),
-            str(user_id)
-        ))
+            """,
+            (
+                data["coins"],
+                data["energy"],
+                data["max_energy"],
+                data["multi_tap_level"],
+                data["energy_level"],
+                data["auto_tap_level"],
+                bool(data["skin_bought"]),
+                data["last_update"],
+                data["username"],
+                data["first_name"],
+                data["ban_end_time"],
+                data["tap_window_start"],
+                data["tap_count"],
+                user_id,
+            ),
+        )
     else:
-        cursor.execute('''
+        cursor.execute(
+            """
             UPDATE users SET
                 coins = ?,
                 energy = ?,
@@ -230,354 +197,573 @@ def get_user_data(user_id, username=None, first_name=None):
                 last_update = ?,
                 username = ?,
                 first_name = ?,
-                ban_end_time = ?
+                ban_end_time = ?,
+                tap_window_start = ?,
+                tap_count = ?
             WHERE user_id = ?
-        ''', (
-            data.get('coins', 0),
-            data.get('energy', 1000),
-            data.get('max_energy', 1000),
-            data.get('multi_tap_level', 1),
-            data.get('energy_level', 1),
-            data.get('auto_tap_level', 0),
-            int(data.get('skin_bought', False)),
-            current_time,
-            data.get('username', 'Аноним'),
-            data.get('first_name', 'Игрок'),
-            data.get('ban_end_time', 0),
-            str(user_id)
-        ))
-    
+            """,
+            (
+                data["coins"],
+                data["energy"],
+                data["max_energy"],
+                data["multi_tap_level"],
+                data["energy_level"],
+                data["auto_tap_level"],
+                int(bool(data["skin_bought"])),
+                data["last_update"],
+                data["username"],
+                data["first_name"],
+                data["ban_end_time"],
+                data["tap_window_start"],
+                data["tap_count"],
+                user_id,
+            ),
+        )
+
+
+def _apply_passive_progress(data: dict, now_ms: int):
+    last_update = int(data.get("last_update", 0))
+    if last_update <= 0:
+        data["last_update"] = now_ms
+        return
+
+    elapsed_seconds = max(0.0, (now_ms - last_update) / 1000)
+    if elapsed_seconds > 0:
+        data["energy"] = min(data["max_energy"], data["energy"] + elapsed_seconds)
+        if data["auto_tap_level"] > 0:
+            data["coins"] += data["auto_tap_level"] * elapsed_seconds
+    data["last_update"] = now_ms
+
+
+def get_user_data(user_id: str, username: str | None = None, first_name: str | None = None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    _insert_user(cursor, user_id, username or "Аноним", first_name or "Игрок")
+    row = _fetch_user_row(cursor, user_id)
+    if row is None:
+        conn.commit()
+        conn.close()
+        raise RuntimeError("User could not be created")
+
+    data = _row_to_data(row)
+    if username:
+        data["username"] = username
+    if first_name:
+        data["first_name"] = first_name
+
+    now_ms = int(time.time() * 1000)
+    _apply_passive_progress(data, now_ms)
+    _save_user(cursor, user_id, data)
+
     conn.commit()
     conn.close()
-    
     return data
 
-def save_user_data(user_id, data):
-    """Сохранить данные пользователя"""
+
+def process_user_action(user_id: str, action: str, username: str | None = None, first_name: str | None = None):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    if DATABASE_URL:
-        cursor.execute('''
-            UPDATE users SET
-                coins = %s,
-                energy = %s,
-                max_energy = %s,
-                multi_tap_level = %s,
-                energy_level = %s,
-                auto_tap_level = %s,
-                skin_bought = %s,
-                last_update = %s,
-                username = %s,
-                first_name = %s,
-                ban_end_time = %s
-            WHERE user_id = %s
-        ''', (
-            data.get('coins', 0),
-            data.get('energy', 1000),
-            data.get('max_energy', 1000),
-            data.get('multi_tap_level', 1),
-            data.get('energy_level', 1),
-            data.get('auto_tap_level', 0),
-            data.get('skin_bought', False),
-            data.get('last_update', 0),
-            data.get('username', 'Аноним'),
-            data.get('first_name', 'Игрок'),
-            data.get('ban_end_time', 0),
-            str(user_id)
-        ))
-    else:
-        cursor.execute('''
-            UPDATE users SET
-                coins = ?,
-                energy = ?,
-                max_energy = ?,
-                multi_tap_level = ?,
-                energy_level = ?,
-                auto_tap_level = ?,
-                skin_bought = ?,
-                last_update = ?,
-                username = ?,
-                first_name = ?,
-                ban_end_time = ?
-            WHERE user_id = ?
-        ''', (
-            data.get('coins', 0),
-            data.get('energy', 1000),
-            data.get('max_energy', 1000),
-            data.get('multi_tap_level', 1),
-            data.get('energy_level', 1),
-            data.get('auto_tap_level', 0),
-            int(data.get('skin_bought', False)),
-            data.get('last_update', 0),
-            data.get('username', 'Аноним'),
-            data.get('first_name', 'Игрок'),
-            data.get('ban_end_time', 0),
-            str(user_id)
-        ))
-    
-    conn.commit()
-    conn.close()
+
+    try:
+        if DATABASE_URL:
+            cursor.execute("BEGIN")
+            cursor.execute("SELECT * FROM users WHERE user_id = %s FOR UPDATE", (user_id,))
+            row = cursor.fetchone()
+        else:
+            cursor.execute("BEGIN IMMEDIATE")
+            row = _fetch_user_row(cursor, user_id)
+
+        if row is None:
+            _insert_user(cursor, user_id, username or "Аноним", first_name or "Игрок")
+            row = _fetch_user_row(cursor, user_id)
+            if row is None:
+                raise RuntimeError("User creation failed")
+
+        data = _row_to_data(row)
+        if username:
+            data["username"] = username
+        if first_name:
+            data["first_name"] = first_name
+
+        now_ms = int(time.time() * 1000)
+        _apply_passive_progress(data, now_ms)
+
+        event = {"status": "ok"}
+
+        if action == "tap":
+            if data["ban_end_time"] > now_ms:
+                event = {
+                    "status": "banned",
+                    "ban_end_time": data["ban_end_time"],
+                }
+            else:
+                if now_ms - data["tap_window_start"] >= 1000:
+                    data["tap_window_start"] = now_ms
+                    data["tap_count"] = 1
+                else:
+                    data["tap_count"] += 1
+
+                if data["tap_count"] > MAX_CLICKS_PER_SECOND:
+                    data["ban_end_time"] = now_ms + AUTOCLICK_BAN_MS
+                    data["tap_count"] = 0
+                    event = {
+                        "status": "banned",
+                        "ban_end_time": data["ban_end_time"],
+                    }
+                elif data["energy"] < 1:
+                    event = {"status": "no_energy"}
+                else:
+                    data["energy"] -= 1
+                    is_combo = random.random() < 0.05
+                    multiplier = 4 if is_combo else 1
+                    coins_earned = data["multi_tap_level"] * multiplier
+                    data["coins"] += coins_earned
+                    event = {
+                        "status": "ok",
+                        "coins_earned": coins_earned,
+                        "is_combo": is_combo,
+                    }
+
+        elif action == "buy_multitap":
+            price = int(100 * (1.2 ** (data["multi_tap_level"] - 1)))
+            if data["coins"] < price:
+                event = {"status": "not_enough_coins", "required": price}
+            else:
+                data["coins"] -= price
+                data["multi_tap_level"] += 1
+
+        elif action == "buy_energy":
+            price = int(200 * (1.2 ** (data["energy_level"] - 1)))
+            if data["coins"] < price:
+                event = {"status": "not_enough_coins", "required": price}
+            else:
+                data["coins"] -= price
+                data["energy_level"] += 1
+                data["max_energy"] += 500
+                data["energy"] = data["max_energy"]
+
+        elif action == "buy_autotap":
+            price = int(500 if data["auto_tap_level"] == 0 else 500 * (1.2 ** data["auto_tap_level"]))
+            if data["coins"] < price:
+                event = {"status": "not_enough_coins", "required": price}
+            else:
+                data["coins"] -= price
+                data["auto_tap_level"] += 1
+
+        elif action == "buy_skin":
+            if data["skin_bought"]:
+                event = {"status": "already_bought"}
+            elif data["coins"] < 1000:
+                event = {"status": "not_enough_coins", "required": 1000}
+            else:
+                data["coins"] -= 1000
+                data["skin_bought"] = True
+
+        else:
+            event = {"status": "invalid_action"}
+
+        data["last_update"] = now_ms
+        _save_user(cursor, user_id, data)
+        conn.commit()
+        return {"event": event, "data": data}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 
 def get_leaderboard():
-    """Получить топ игроков"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    cursor.execute('''
+    cursor.execute(
+        """
         SELECT user_id, username, first_name, coins, multi_tap_level
         FROM users
         ORDER BY coins DESC
         LIMIT 100
-    ''')
-    
+        """
+    )
     rows = cursor.fetchall()
     conn.close()
-    
     return [
         {
             "user_id": row[0],
             "username": row[1],
             "first_name": row[2],
             "coins": float(row[3]),
-            "multi_tap_level": int(row[4])
+            "multi_tap_level": int(row[4]),
         }
         for row in rows
     ]
 
+
 def is_admin(user_id: int) -> bool:
-    """Проверка является ли пользователь админом"""
     return user_id == ADMIN_ID
+
+
+def verify_telegram_init_data(init_data_raw: str):
+    if not init_data_raw:
+        return None
+
+    pairs = dict(parse_qsl(init_data_raw, keep_blank_values=True))
+    data_hash = pairs.pop("hash", None)
+    if not data_hash:
+        return None
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, data_hash):
+        return None
+
+    auth_date = int(pairs.get("auth_date", "0"))
+    if auth_date <= 0:
+        return None
+    if time.time() - auth_date > AUTH_MAX_AGE_SECONDS:
+        return None
+
+    user_raw = pairs.get("user")
+    if not user_raw:
+        return None
+
+    try:
+        user = json.loads(user_raw)
+    except json.JSONDecodeError:
+        return None
+
+    if "id" not in user:
+        return None
+
+    return user
+
+
+def get_verified_webapp_user(request: web.Request):
+    init_data_raw = request.headers.get("X-Telegram-Init-Data", "")
+    if not init_data_raw:
+        init_data_raw = request.query.get("initData", "")
+    return verify_telegram_init_data(init_data_raw)
+
+
+async def run_blocking(func, *args):
+    return await asyncio.to_thread(func, *args)
+
+
+def _build_start_keyboard():
+    if WEBAPP_URL.startswith("https://"):
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🐹 Открыть Анара", web_app=WebAppInfo(url=WEBAPP_URL))]]
+        )
+    return None
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🐹 Открыть Анара",
-            web_app=WebAppInfo(url=WEBAPP_URL)
-        )]
-    ])
-    
+    keyboard = _build_start_keyboard()
+
     admin_text = ""
     if is_admin(message.from_user.id):
         admin_text = "\n\n👑 Админ-команды:\n/admin - панель управления"
-    
-    await message.answer(
-        "Добро пожаловать в Анар тап!🐹🐹🐹\n\n"
-        f"Тапай по ананисту и прокачивайся!{admin_text}",
-        reply_markup=keyboard
-    )
+
+    text = "Добро пожаловать в Анар тап!\n\nТапай и прокачивайся!"
+    if keyboard is None:
+        text += "\n\n⚠️ WEBAPP_URL не настроен (нужен https://...)"
+
+    await message.answer(f"{text}{admin_text}", reply_markup=keyboard)
+
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
-    """Админ-панель"""
     if not is_admin(message.from_user.id):
         await message.answer("❌ У вас нет доступа к этой команде")
         return
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Статистика
-    cursor.execute('SELECT COUNT(*) FROM users')
-    total_users = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT SUM(coins) FROM users')
-    total_coins = cursor.fetchone()[0] or 0
-    
-    cursor.execute('SELECT first_name, coins FROM users ORDER BY coins DESC LIMIT 1')
-    top_user = cursor.fetchone()
-    
-    conn.close()
-    
+
+    def _admin_stats():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+        cursor.execute("SELECT SUM(coins) FROM users")
+        total_coins = cursor.fetchone()[0] or 0
+        cursor.execute("SELECT first_name, coins FROM users ORDER BY coins DESC LIMIT 1")
+        top_user = cursor.fetchone()
+        conn.close()
+        return total_users, total_coins, top_user
+
+    total_users, total_coins, top_user = await run_blocking(_admin_stats)
+
     admin_text = (
         "👑 АДМИН-ПАНЕЛЬ\n\n"
         f"📊 Статистика:\n"
         f"• Всего игроков: {total_users}\n"
         f"• Всего монет: {int(float(total_coins))}\n"
         f"• Топ игрок: {top_user[0] if top_user else 'Нет'} ({int(float(top_user[1])) if top_user else 0} монет)\n\n"
-        f"📝 Команды:\n"
-        f"/users - список всех пользователей\n"
-        f"/give [user_id] [монеты] - выдать монеты\n"
-        f"/reset [user_id] - сбросить прогресс\n"
-        f"/ban [user_id] - забанить пользователя\n"
-        f"/stats [user_id] - статистика игрока\n"
-        f"/broadcast [текст] - рассылка всем"
+        "📝 Команды:\n"
+        "/users - список всех пользователей\n"
+        "/give [user_id] [монеты] - выдать монеты\n"
+        "/reset [user_id] - сбросить прогресс\n"
+        "/ban [user_id] [минуты] - забанить пользователя\n"
+        "/stats [user_id] - статистика игрока\n"
+        "/broadcast [текст] - рассылка всем"
     )
-    
     await message.answer(admin_text)
+
 
 @dp.message(Command("users"))
 async def cmd_users(message: types.Message):
-    """Список пользователей"""
     if not is_admin(message.from_user.id):
         return
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT user_id, first_name, coins, multi_tap_level
-        FROM users
-        ORDER BY coins DESC
-        LIMIT 50
-    ''')
-    
-    users = cursor.fetchall()
-    conn.close()
-    
+
+    def _get_users():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT user_id, first_name, coins, multi_tap_level
+            FROM users
+            ORDER BY coins DESC
+            LIMIT 50
+            """
+        )
+        result = cursor.fetchall()
+        conn.close()
+        return result
+
+    users = await run_blocking(_get_users)
+
     if not users:
         await message.answer("Пользователей пока нет")
         return
-    
+
     text = "👥 Топ-50 пользователей:\n\n"
     for i, (user_id, name, coins, level) in enumerate(users, 1):
         text += f"{i}. {name} (ID: {user_id})\n   💰 {int(float(coins))} монет | 👆 Ур.{level}\n\n"
-    
     await message.answer(text)
+
 
 @dp.message(Command("give"))
 async def cmd_give(message: types.Message):
-    """Выдать монеты пользователю"""
     if not is_admin(message.from_user.id):
         return
-    
+
     try:
         args = message.text.split()
         if len(args) < 3:
             await message.answer("Использование: /give [user_id] [монеты]")
             return
-        
+
         user_id = args[1]
         coins = float(args[2])
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT coins, first_name FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT coins, first_name FROM users WHERE user_id = ?', (user_id,))
-        user = cursor.fetchone()
-        
-        if not user:
-            await message.answer(f"❌ Пользователь {user_id} не найден")
-            conn.close()
+        if coins <= 0:
+            await message.answer("❌ Количество монет должно быть больше 0")
             return
-        
-        new_coins = float(user[0]) + coins
-        cursor.execute('UPDATE users SET coins = %s WHERE user_id = %s' if DATABASE_URL else 'UPDATE users SET coins = ? WHERE user_id = ?', (new_coins, user_id))
-        conn.commit()
-        conn.close()
-        
+
+        def _give():
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            query = "SELECT coins, first_name FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT coins, first_name FROM users WHERE user_id = ?"
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            if not user:
+                conn.close()
+                return None
+            new_coins = float(user[0]) + coins
+            update_q = "UPDATE users SET coins = %s WHERE user_id = %s" if DATABASE_URL else "UPDATE users SET coins = ? WHERE user_id = ?"
+            cursor.execute(update_q, (new_coins, user_id))
+            conn.commit()
+            conn.close()
+            return user, new_coins
+
+        result = await run_blocking(_give)
+        if result is None:
+            await message.answer(f"❌ Пользователь {user_id} не найден")
+            return
+
+        user, new_coins = result
         await message.answer(
             f"✅ Выдано {int(coins)} монет пользователю {user[1]}\n"
-            f"Было: {int(float(user[0]))} → Стало: {int(new_coins)}"
+            f"Было: {int(float(user[0]))} -> Стало: {int(new_coins)}"
         )
-        
-        # Уведомляем пользователя
+
         try:
-            await bot.send_message(
-                int(user_id),
-                f"🎁 Вам начислено {int(coins)} монет от администратора!"
-            )
-        except:
+            await bot.send_message(int(user_id), f"🎁 Вам начислено {int(coins)} монет от администратора!")
+        except Exception:
             pass
-            
+    except ValueError:
+        await message.answer("❌ Неверный формат монет")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
+
 @dp.message(Command("reset"))
 async def cmd_reset(message: types.Message):
-    """Сбросить прогресс пользователя"""
     if not is_admin(message.from_user.id):
         return
-    
+
     try:
         args = message.text.split()
         if len(args) < 2:
             await message.answer("Использование: /reset [user_id]")
             return
-        
+
         user_id = args[1]
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT first_name FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT first_name FROM users WHERE user_id = ?', (user_id,))
-        user = cursor.fetchone()
-        
+
+        def _reset():
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            query = "SELECT first_name FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT first_name FROM users WHERE user_id = ?"
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            if not user:
+                conn.close()
+                return None
+
+            if DATABASE_URL:
+                cursor.execute(
+                    """
+                    UPDATE users SET
+                        coins = 0,
+                        energy = 1000,
+                        max_energy = 1000,
+                        multi_tap_level = 1,
+                        energy_level = 1,
+                        auto_tap_level = 0,
+                        skin_bought = FALSE,
+                        ban_end_time = 0,
+                        tap_window_start = 0,
+                        tap_count = 0,
+                        last_update = %s
+                    WHERE user_id = %s
+                    """,
+                    (int(time.time() * 1000), user_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE users SET
+                        coins = 0,
+                        energy = 1000,
+                        max_energy = 1000,
+                        multi_tap_level = 1,
+                        energy_level = 1,
+                        auto_tap_level = 0,
+                        skin_bought = 0,
+                        ban_end_time = 0,
+                        tap_window_start = 0,
+                        tap_count = 0,
+                        last_update = ?
+                    WHERE user_id = ?
+                    """,
+                    (int(time.time() * 1000), user_id),
+                )
+            conn.commit()
+            conn.close()
+            return user
+
+        user = await run_blocking(_reset)
         if not user:
             await message.answer(f"❌ Пользователь {user_id} не найден")
-            conn.close()
             return
-        
-        if DATABASE_URL:
-            cursor.execute('''
-                UPDATE users SET
-                    coins = 0,
-                    energy = 1000,
-                    max_energy = 1000,
-                    multi_tap_level = 1,
-                    energy_level = 1,
-                    auto_tap_level = 0,
-                    skin_bought = FALSE
-                WHERE user_id = %s
-            ''', (user_id,))
-        else:
-            cursor.execute('''
-                UPDATE users SET
-                    coins = 0,
-                    energy = 1000,
-                    max_energy = 1000,
-                    multi_tap_level = 1,
-                    energy_level = 1,
-                    auto_tap_level = 0,
-                    skin_bought = 0
-                WHERE user_id = ?
-            ''', (user_id,))
-        conn.commit()
-        conn.close()
-        
+
         await message.answer(f"✅ Прогресс пользователя {user[0]} сброшен")
-        
-        # Уведомляем пользователя
         try:
-            await bot.send_message(
-                int(user_id),
-                "⚠️ Ваш прогресс был сброшен администратором"
-            )
-        except:
+            await bot.send_message(int(user_id), "⚠️ Ваш прогресс был сброшен администратором")
+        except Exception:
             pass
-            
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    """Статистика пользователя"""
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
+
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("Использование: /ban [user_id] [минуты]")
+            return
+
+        user_id = args[1]
+        minutes = int(args[2]) if len(args) >= 3 else 60
+        if minutes <= 0:
+            await message.answer("❌ Минуты должны быть больше 0")
+            return
+
+        ban_end = int(time.time() * 1000) + minutes * 60 * 1000
+
+        def _ban():
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            query = "SELECT first_name FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT first_name FROM users WHERE user_id = ?"
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            if not user:
+                conn.close()
+                return None
+
+            update_q = "UPDATE users SET ban_end_time = %s WHERE user_id = %s" if DATABASE_URL else "UPDATE users SET ban_end_time = ? WHERE user_id = ?"
+            cursor.execute(update_q, (ban_end, user_id))
+            conn.commit()
+            conn.close()
+            return user
+
+        user = await run_blocking(_ban)
+        if not user:
+            await message.answer(f"❌ Пользователь {user_id} не найден")
+            return
+
+        await message.answer(f"✅ Пользователь {user[0]} забанен на {minutes} мин.")
+
+        try:
+            await bot.send_message(int(user_id), f"⛔ Вы заблокированы администратором на {minutes} мин.")
+        except Exception:
+            pass
+    except ValueError:
+        await message.answer("❌ Неверный формат минут")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+
     try:
         args = message.text.split()
         if len(args) < 2:
             await message.answer("Использование: /stats [user_id]")
             return
-        
+
         user_id = args[1]
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-        
+
+        def _stats():
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            query = "SELECT * FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT * FROM users WHERE user_id = ?"
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            conn.close()
+            return user
+
+        user = await run_blocking(_stats)
         if not user:
             await message.answer(f"❌ Пользователь {user_id} не найден")
             return
-        
+
+        ban_until = int(user[11]) if len(user) > 11 else 0
+        now_ms = int(time.time() * 1000)
+        ban_text = "Нет"
+        if ban_until > now_ms:
+            remain_s = (ban_until - now_ms) // 1000
+            ban_text = f"Да ({remain_s} сек.)"
+
         stats_text = (
-            f"📊 Статистика игрока\n\n"
+            "📊 Статистика игрока\n\n"
             f"👤 Имя: {user[10]}\n"
             f"🆔 ID: {user[0]}\n"
             f"💰 Монеты: {int(float(user[1]))}\n"
@@ -585,128 +771,172 @@ async def cmd_stats(message: types.Message):
             f"👆 Мульти-тап: Ур.{user[4]}\n"
             f"🔋 Энергия+: Ур.{user[5]}\n"
             f"🤖 Авто-тап: Ур.{user[6]}\n"
-            f"🎨 Золотой скин: {'Да' if user[7] else 'Нет'}"
+            f"🎨 Золотой скин: {'Да' if user[7] else 'Нет'}\n"
+            f"⛔ Бан: {ban_text}"
         )
-        
         await message.answer(stats_text)
-        
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
+
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message):
-    """Рассылка всем пользователям"""
     if not is_admin(message.from_user.id):
         return
-    
+
     try:
         text = message.text.replace("/broadcast", "", 1).strip()
         if not text:
             await message.answer("Использование: /broadcast [текст сообщения]")
             return
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT user_id FROM users')
-        users = cursor.fetchall()
-        conn.close()
-        
+
+        def _all_users():
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users")
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+
+        users = await run_blocking(_all_users)
+
         success = 0
         failed = 0
-        
         status_msg = await message.answer(f"📤 Начинаю рассылку для {len(users)} пользователей...")
-        
+
         for (user_id,) in users:
             try:
                 await bot.send_message(int(user_id), f"📢 Сообщение от администратора:\n\n{text}")
                 success += 1
-            except:
+            except Exception:
                 failed += 1
-        
-        await status_msg.edit_text(
-            f"✅ Рассылка завершена!\n\n"
-            f"Успешно: {success}\n"
-            f"Ошибок: {failed}"
-        )
-        
+
+        await status_msg.edit_text(f"✅ Рассылка завершена!\n\nУспешно: {success}\nОшибок: {failed}")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
-# Веб-сервер для API
+
 routes = web.RouteTableDef()
 
-@routes.get('/api/user/{user_id}')
+
+@routes.get("/api/user/{user_id}")
 async def get_user(request):
-    """Получить данные пользователя"""
-    user_id = request.match_info['user_id']
-    username = request.query.get('username')
-    first_name = request.query.get('first_name')
-    data = get_user_data(user_id, username, first_name)
+    web_user = get_verified_webapp_user(request)
+    if not web_user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    user_id = request.match_info["user_id"]
+    if str(web_user["id"]) != str(user_id):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    username = web_user.get("username") or "Аноним"
+    first_name = web_user.get("first_name") or "Игрок"
+    data = await run_blocking(get_user_data, str(user_id), username, first_name)
     return web.json_response(data)
 
-@routes.post('/api/user/{user_id}')
-async def update_user(request):
-    """Обновить данные пользователя"""
-    user_id = request.match_info['user_id']
-    new_data = await request.json()
-    
-    save_user_data(user_id, new_data)
-    
-    return web.json_response({"status": "ok"})
 
-@routes.get('/api/leaderboard')
+@routes.post("/api/action/{user_id}")
+async def user_action(request):
+    web_user = get_verified_webapp_user(request)
+    if not web_user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    user_id = request.match_info["user_id"]
+    if str(web_user["id"]) != str(user_id):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid_json"}, status=400)
+
+    action = str(payload.get("action", "")).strip()
+    if not action:
+        return web.json_response({"error": "action_required"}, status=400)
+
+    result = await run_blocking(
+        process_user_action,
+        str(user_id),
+        action,
+        web_user.get("username") or "Аноним",
+        web_user.get("first_name") or "Игрок",
+    )
+    return web.json_response(result)
+
+
+@routes.post("/api/user/{user_id}")
+async def update_user_deprecated(request):
+    web_user = get_verified_webapp_user(request)
+    if not web_user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    user_id = request.match_info["user_id"]
+    if str(web_user["id"]) != str(user_id):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    # Deprecated endpoint: sync and return canonical server state.
+    data = await run_blocking(
+        get_user_data,
+        str(user_id),
+        web_user.get("username") or "Аноним",
+        web_user.get("first_name") or "Игрок",
+    )
+    return web.json_response({"status": "ok", "data": data})
+
+
+@routes.get("/api/leaderboard")
 async def get_leaderboard_route(request):
-    """Получить топ игроков"""
-    leaderboard = get_leaderboard()
+    web_user = get_verified_webapp_user(request)
+    if not web_user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    leaderboard = await run_blocking(get_leaderboard)
     return web.json_response(leaderboard)
 
-@routes.get('/')
+
+@routes.get("/")
 async def index(request):
-    """Отдать главную страницу"""
-    with open('index.html', 'r', encoding='utf-8') as f:
-        return web.Response(text=f.read(), content_type='text/html')
+    with open("index.html", "r", encoding="utf-8") as f:
+        return web.Response(text=f.read(), content_type="text/html")
 
-@routes.get('/style.css')
+
+@routes.get("/style.css")
 async def style(request):
-    """Отдать CSS"""
-    with open('style.css', 'r', encoding='utf-8') as f:
-        return web.Response(text=f.read(), content_type='text/css')
+    with open("style.css", "r", encoding="utf-8") as f:
+        return web.Response(text=f.read(), content_type="text/css")
 
-@routes.get('/script.js')
+
+@routes.get("/script.js")
 async def script(request):
-    """Отдать JS"""
-    with open('script.js', 'r', encoding='utf-8') as f:
-        return web.Response(text=f.read(), content_type='application/javascript')
+    with open("script.js", "r", encoding="utf-8") as f:
+        return web.Response(text=f.read(), content_type="application/javascript")
 
-@routes.get('/image.jpg')
+
+@routes.get("/image.jpg")
 async def image(request):
-    """Отдать картинку хомяка"""
-    with open('image.jpg', 'rb') as f:
-        return web.Response(body=f.read(), content_type='image/jpeg')
+    with open("image.jpg", "rb") as f:
+        return web.Response(body=f.read(), content_type="image/jpeg")
+
 
 async def start_web_server():
-    """Запуск веб-сервера"""
     app = web.Application()
     app.add_routes(routes)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     print("Веб-сервер запущен на порту 8080")
 
+
 async def main():
-    """Главная функция"""
-    # Инициализируем базу данных
     init_db()
     print("База данных инициализирована")
-    
-    # Запускаем веб-сервер
+
     await start_web_server()
-    
-    # Запускаем бота
+
     print("Бот запущен")
     await dp.start_polling(bot)
 
-if __name__ == '__main__':
-    asyncio.run(main())
 
+if __name__ == "__main__":
+    asyncio.run(main())
