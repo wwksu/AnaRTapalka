@@ -93,12 +93,13 @@ def init_db():
 
 def get_user_data(user_id, username=None, first_name=None):
     """Получить данные пользователя или создать новые"""
+    import time
     conn = get_db_connection()
     cursor = conn.cursor()
-    
+
     cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
     row = cursor.fetchone()
-    
+
     if row is None:
         # Создаём нового пользователя
         if DATABASE_URL:
@@ -112,7 +113,7 @@ def get_user_data(user_id, username=None, first_name=None):
                 VALUES (?, ?, ?)
             ''', (str(user_id), username or 'Аноним', first_name or 'Игрок'))
         conn.commit()
-        
+
         # Получаем созданного пользователя
         cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
         row = cursor.fetchone()
@@ -132,13 +133,11 @@ def get_user_data(user_id, username=None, first_name=None):
             conn.commit()
             cursor.execute('SELECT * FROM users WHERE user_id = %s' if DATABASE_URL else 'SELECT * FROM users WHERE user_id = ?', (str(user_id),))
             row = cursor.fetchone()
-    
-    conn.close()
-    
+
     # Преобразуем в словарь
     if DATABASE_URL:
         # PostgreSQL возвращает кортеж
-        return {
+        data = {
             "coins": float(row[1]),
             "energy": float(row[2]),
             "max_energy": int(row[3]),
@@ -153,7 +152,7 @@ def get_user_data(user_id, username=None, first_name=None):
         }
     else:
         # SQLite
-        return {
+        data = {
             "coins": row[1],
             "energy": row[2],
             "max_energy": row[3],
@@ -166,6 +165,92 @@ def get_user_data(user_id, username=None, first_name=None):
             "first_name": row[10],
             "ban_end_time": row[11] if len(row) > 11 else 0
         }
+
+    conn.close()
+
+    # Рассчитываем восстановление энергии и монет за время отсутствия
+    current_time = int(time.time() * 1000)  # в миллисекундах
+    last_update = data.get('last_update', 0)
+    
+    if last_update > 0:
+        elapsed_seconds = (current_time - last_update) / 1000
+        
+        # Восстановление энергии (1 в секунду)
+        if elapsed_seconds > 0:
+            data['energy'] = min(data['energy'] + elapsed_seconds, data['max_energy'])
+        
+        # Авто-тап (пассивный доход)
+        auto_tap_level = data.get('auto_tap_level', 0)
+        if auto_tap_level > 0:
+            data['coins'] += auto_tap_level * elapsed_seconds
+
+    # Обновляем last_update и сохраняем (напрямую через SQL, чтобы избежать рекурсии)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if DATABASE_URL:
+        cursor.execute('''
+            UPDATE users SET
+                coins = %s,
+                energy = %s,
+                max_energy = %s,
+                multi_tap_level = %s,
+                energy_level = %s,
+                auto_tap_level = %s,
+                skin_bought = %s,
+                last_update = %s,
+                username = %s,
+                first_name = %s,
+                ban_end_time = %s
+            WHERE user_id = %s
+        ''', (
+            data.get('coins', 0),
+            data.get('energy', 1000),
+            data.get('max_energy', 1000),
+            data.get('multi_tap_level', 1),
+            data.get('energy_level', 1),
+            data.get('auto_tap_level', 0),
+            data.get('skin_bought', False),
+            current_time,
+            data.get('username', 'Аноним'),
+            data.get('first_name', 'Игрок'),
+            data.get('ban_end_time', 0),
+            str(user_id)
+        ))
+    else:
+        cursor.execute('''
+            UPDATE users SET
+                coins = ?,
+                energy = ?,
+                max_energy = ?,
+                multi_tap_level = ?,
+                energy_level = ?,
+                auto_tap_level = ?,
+                skin_bought = ?,
+                last_update = ?,
+                username = ?,
+                first_name = ?,
+                ban_end_time = ?
+            WHERE user_id = ?
+        ''', (
+            data.get('coins', 0),
+            data.get('energy', 1000),
+            data.get('max_energy', 1000),
+            data.get('multi_tap_level', 1),
+            data.get('energy_level', 1),
+            data.get('auto_tap_level', 0),
+            int(data.get('skin_bought', False)),
+            current_time,
+            data.get('username', 'Аноним'),
+            data.get('first_name', 'Игрок'),
+            data.get('ban_end_time', 0),
+            str(user_id)
+        ))
+    
+    conn.commit()
+    conn.close()
+    
+    return data
 
 def save_user_data(user_id, data):
     """Сохранить данные пользователя"""
