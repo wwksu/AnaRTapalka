@@ -288,7 +288,13 @@ def get_user_data(user_id: str, username: str | None = None, first_name: str | N
     return data
 
 
-def process_user_action(user_id: str, action: str, username: str | None = None, first_name: str | None = None):
+def process_user_action(
+    user_id: str,
+    action: str,
+    username: str | None = None,
+    first_name: str | None = None,
+    action_payload: dict | None = None,
+):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -316,39 +322,70 @@ def process_user_action(user_id: str, action: str, username: str | None = None, 
         _apply_passive_progress(data, now_ms)
 
         event = {"status": "ok"}
+        payload = action_payload or {}
+        taps_requested = 1
+
+        if action == "tap_batch":
+            raw_count = payload.get("count", 1)
+            try:
+                taps_requested = int(raw_count)
+            except (TypeError, ValueError):
+                taps_requested = 1
+            taps_requested = max(1, min(taps_requested, 50))
+            action = "tap"
 
         if action == "tap":
-            if data["ban_end_time"] > now_ms:
-                event = {
-                    "status": "banned",
-                    "ban_end_time": data["ban_end_time"],
-                }
-            else:
-                if now_ms - data["tap_window_start"] >= 1000:
-                    data["tap_window_start"] = now_ms
+            coins_earned_total = 0
+            combo_hits = 0
+            taps_processed = 0
+
+            for _ in range(taps_requested):
+                tap_now = int(time.time() * 1000)
+
+                if data["ban_end_time"] > tap_now:
+                    event = {
+                        "status": "banned",
+                        "ban_end_time": data["ban_end_time"],
+                    }
+                    break
+
+                if tap_now - data["tap_window_start"] >= 1000:
+                    data["tap_window_start"] = tap_now
                     data["tap_count"] = 1
                 else:
                     data["tap_count"] += 1
 
                 if data["tap_count"] > MAX_CLICKS_PER_SECOND:
-                    data["ban_end_time"] = now_ms + AUTOCLICK_BAN_MS
+                    data["ban_end_time"] = tap_now + AUTOCLICK_BAN_MS
                     data["tap_count"] = 0
                     event = {
                         "status": "banned",
                         "ban_end_time": data["ban_end_time"],
                     }
-                elif data["energy"] < 1:
+                    break
+
+                if data["energy"] < 1:
+                    break
+
+                data["energy"] -= 1
+                is_combo = random.random() < 0.05
+                multiplier = 4 if is_combo else 1
+                coins_earned = data["multi_tap_level"] * multiplier
+                data["coins"] += coins_earned
+                coins_earned_total += coins_earned
+                combo_hits += int(is_combo)
+                taps_processed += 1
+
+            if event.get("status") != "banned":
+                if taps_processed == 0:
                     event = {"status": "no_energy"}
                 else:
-                    data["energy"] -= 1
-                    is_combo = random.random() < 0.05
-                    multiplier = 4 if is_combo else 1
-                    coins_earned = data["multi_tap_level"] * multiplier
-                    data["coins"] += coins_earned
                     event = {
                         "status": "ok",
-                        "coins_earned": coins_earned,
-                        "is_combo": is_combo,
+                        "coins_earned": coins_earned_total,
+                        "combo_hits": combo_hits,
+                        "taps_processed": taps_processed,
+                        "taps_requested": taps_requested,
                     }
 
         elif action == "buy_multitap":
@@ -878,6 +915,7 @@ async def user_action(request):
         action,
         web_user.get("username") or "Аноним",
         web_user.get("first_name") or "Игрок",
+        payload,
     )
     return web.json_response(result)
 
