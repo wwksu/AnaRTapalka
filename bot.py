@@ -54,6 +54,13 @@ def init_db():
                 ban_end_time BIGINT DEFAULT 0
             )
         ''')
+        # Добавляем колонку ban_end_time если её нет
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN ban_end_time BIGINT DEFAULT 0')
+            conn.commit()
+            print("Добавлена колонка ban_end_time в PostgreSQL")
+        except:
+            pass  # Колонка уже существует
     else:
         # SQLite
         cursor.execute('''
@@ -72,6 +79,13 @@ def init_db():
                 ban_end_time INTEGER DEFAULT 0
             )
         ''')
+        # Добавляем колонку ban_end_time если её нет
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN ban_end_time INTEGER DEFAULT 0')
+            conn.commit()
+            print("Добавлена колонка ban_end_time в SQLite")
+        except:
+            pass  # Колонка уже существует
     
     conn.commit()
     conn.close()
