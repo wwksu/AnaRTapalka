@@ -120,10 +120,23 @@ function updateShopUI() {
 }
 let clickTimes = [];
 const MAX_CLICKS_PER_SECOND = 20;
+let banEndTime = 0;
+const BAN_DURATION = 2 * 60 * 1000; // 2 минуты в миллисекундах
 
 // Функция проверки автокликера
 function checkAutoClicker() {
     const now = Date.now();
+    
+    // Проверяем, не забанен ли игрок
+    if (banEndTime > now) {
+        const remainingTime = Math.ceil((banEndTime - now) / 1000);
+        const minutes = Math.floor(remainingTime / 60);
+        const seconds = remainingTime % 60;
+        const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        
+        alert(`⚠️ Autoclicker запрещен!\nВремя блокировки: ${timeString}`);
+        return false;
+    }
     
     // Добавляем текущее время клика
     clickTimes.push(now);
@@ -133,11 +146,11 @@ function checkAutoClicker() {
     
     // Проверяем количество кликов за последнюю секунду
     if (clickTimes.length > MAX_CLICKS_PER_SECOND) {
-        // Показываем предупреждение
-        alert('⚠️ Autoclicker запрещен!');
-        
-        // Опционально: можно заблокировать тапы на несколько секунд
+        // Выдаем бан на 2 минуты
+        banEndTime = now + BAN_DURATION;
         clickTimes = [];
+        
+        alert(`⚠️ Autoclicker запрещен!\nВремя блокировки: 2:00`);
         return false;
     }
     
@@ -329,6 +342,7 @@ async function loadLeaderboard() {
 
 // Инициализация при загрузке
 loadUserData();
+
 
 
 
