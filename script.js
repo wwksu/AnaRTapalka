@@ -59,6 +59,9 @@ async function loadUserData() {
 // Сохранение данных пользователя
 async function saveUserData() {
     try {
+        // Обновляем last_update перед сохранением
+        gameState.last_update = Date.now();
+        
         await fetch(`/api/user/${userId}`, {
             method: 'POST',
             headers: {
