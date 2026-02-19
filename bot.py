@@ -9,6 +9,7 @@ import time
 from urllib.parse import parse_qsl
 
 import psycopg2
+from psycopg2 import pool as pg_pool
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -29,12 +30,25 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "1254600026"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+PG_POOL = None
 
 
 def get_db_connection():
     if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL, sslmode="require")
+        if PG_POOL is None:
+            raise RuntimeError("PostgreSQL pool is not initialized")
+        conn = PG_POOL.getconn()
+        conn.autocommit = True
+        return conn
     return sqlite3.connect("users.db")
+
+
+def close_db_connection(conn):
+    if DATABASE_URL:
+        if PG_POOL is not None:
+            PG_POOL.putconn(conn)
+        return
+    conn.close()
 
 
 def _sqlite_column_exists(cursor, table_name: str, column_name: str) -> bool:
@@ -43,6 +57,15 @@ def _sqlite_column_exists(cursor, table_name: str, column_name: str) -> bool:
 
 
 def init_db():
+    global PG_POOL
+    if DATABASE_URL and PG_POOL is None:
+        PG_POOL = pg_pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=int(os.getenv("DB_POOL_MAX", "20")),
+            dsn=DATABASE_URL,
+            sslmode="require",
+        )
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -70,6 +93,7 @@ def init_db():
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_end_time BIGINT DEFAULT 0")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tap_window_start BIGINT DEFAULT 0")
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tap_count INTEGER DEFAULT 0")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_coins_desc ON users (coins DESC)")
     else:
         cursor.execute(
             """
@@ -97,13 +121,19 @@ def init_db():
             cursor.execute("ALTER TABLE users ADD COLUMN tap_window_start INTEGER DEFAULT 0")
         if not _sqlite_column_exists(cursor, "users", "tap_count"):
             cursor.execute("ALTER TABLE users ADD COLUMN tap_count INTEGER DEFAULT 0")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_coins_desc ON users (coins DESC)")
 
     conn.commit()
-    conn.close()
+    close_db_connection(conn)
 
 
-def _fetch_user_row(cursor, user_id: str):
-    query = "SELECT * FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT * FROM users WHERE user_id = ?"
+def _fetch_user_row(cursor, user_id: str, for_update: bool = False):
+    if DATABASE_URL:
+        query = "SELECT * FROM users WHERE user_id = %s"
+        if for_update:
+            query += " FOR UPDATE"
+    else:
+        query = "SELECT * FROM users WHERE user_id = ?"
     cursor.execute(query, (user_id,))
     return cursor.fetchone()
 
@@ -230,8 +260,6 @@ def _apply_passive_progress(data: dict, now_ms: int):
     elapsed_seconds = max(0.0, (now_ms - last_update) / 1000)
     if elapsed_seconds > 0:
         data["energy"] = min(data["max_energy"], data["energy"] + elapsed_seconds)
-        if data["auto_tap_level"] > 0:
-            data["coins"] += data["auto_tap_level"] * elapsed_seconds
     data["last_update"] = now_ms
 
 
@@ -243,7 +271,7 @@ def get_user_data(user_id: str, username: str | None = None, first_name: str | N
     row = _fetch_user_row(cursor, user_id)
     if row is None:
         conn.commit()
-        conn.close()
+        close_db_connection(conn)
         raise RuntimeError("User could not be created")
 
     data = _row_to_data(row)
@@ -254,10 +282,9 @@ def get_user_data(user_id: str, username: str | None = None, first_name: str | N
 
     now_ms = int(time.time() * 1000)
     _apply_passive_progress(data, now_ms)
-    _save_user(cursor, user_id, data)
 
     conn.commit()
-    conn.close()
+    close_db_connection(conn)
     return data
 
 
@@ -268,15 +295,14 @@ def process_user_action(user_id: str, action: str, username: str | None = None, 
     try:
         if DATABASE_URL:
             cursor.execute("BEGIN")
-            cursor.execute("SELECT * FROM users WHERE user_id = %s FOR UPDATE", (user_id,))
-            row = cursor.fetchone()
+            row = _fetch_user_row(cursor, user_id, for_update=True)
         else:
             cursor.execute("BEGIN IMMEDIATE")
             row = _fetch_user_row(cursor, user_id)
 
         if row is None:
             _insert_user(cursor, user_id, username or "Аноним", first_name or "Игрок")
-            row = _fetch_user_row(cursor, user_id)
+            row = _fetch_user_row(cursor, user_id, for_update=bool(DATABASE_URL))
             if row is None:
                 raise RuntimeError("User creation failed")
 
@@ -344,12 +370,7 @@ def process_user_action(user_id: str, action: str, username: str | None = None, 
                 data["energy"] = data["max_energy"]
 
         elif action == "buy_autotap":
-            price = int(500 if data["auto_tap_level"] == 0 else 500 * (1.2 ** data["auto_tap_level"]))
-            if data["coins"] < price:
-                event = {"status": "not_enough_coins", "required": price}
-            else:
-                data["coins"] -= price
-                data["auto_tap_level"] += 1
+            event = {"status": "feature_disabled"}
 
         elif action == "buy_skin":
             if data["skin_bought"]:
@@ -371,7 +392,7 @@ def process_user_action(user_id: str, action: str, username: str | None = None, 
         conn.rollback()
         raise
     finally:
-        conn.close()
+        close_db_connection(conn)
 
 
 def get_leaderboard():
@@ -386,7 +407,7 @@ def get_leaderboard():
         """
     )
     rows = cursor.fetchall()
-    conn.close()
+    close_db_connection(conn)
     return [
         {
             "user_id": row[0],
@@ -442,8 +463,6 @@ def verify_telegram_init_data(init_data_raw: str):
 
 def get_verified_webapp_user(request: web.Request):
     init_data_raw = request.headers.get("X-Telegram-Init-Data", "")
-    if not init_data_raw:
-        init_data_raw = request.query.get("initData", "")
     return verify_telegram_init_data(init_data_raw)
 
 
@@ -489,7 +508,7 @@ async def cmd_admin(message: types.Message):
         total_coins = cursor.fetchone()[0] or 0
         cursor.execute("SELECT first_name, coins FROM users ORDER BY coins DESC LIMIT 1")
         top_user = cursor.fetchone()
-        conn.close()
+        close_db_connection(conn)
         return total_users, total_coins, top_user
 
     total_users, total_coins, top_user = await run_blocking(_admin_stats)
@@ -528,7 +547,7 @@ async def cmd_users(message: types.Message):
             """
         )
         result = cursor.fetchall()
-        conn.close()
+        close_db_connection(conn)
         return result
 
     users = await run_blocking(_get_users)
@@ -567,13 +586,13 @@ async def cmd_give(message: types.Message):
             cursor.execute(query, (user_id,))
             user = cursor.fetchone()
             if not user:
-                conn.close()
+                close_db_connection(conn)
                 return None
             new_coins = float(user[0]) + coins
             update_q = "UPDATE users SET coins = %s WHERE user_id = %s" if DATABASE_URL else "UPDATE users SET coins = ? WHERE user_id = ?"
             cursor.execute(update_q, (new_coins, user_id))
             conn.commit()
-            conn.close()
+            close_db_connection(conn)
             return user, new_coins
 
         result = await run_blocking(_give)
@@ -617,7 +636,7 @@ async def cmd_reset(message: types.Message):
             cursor.execute(query, (user_id,))
             user = cursor.fetchone()
             if not user:
-                conn.close()
+                close_db_connection(conn)
                 return None
 
             if DATABASE_URL:
@@ -659,7 +678,7 @@ async def cmd_reset(message: types.Message):
                     (int(time.time() * 1000), user_id),
                 )
             conn.commit()
-            conn.close()
+            close_db_connection(conn)
             return user
 
         user = await run_blocking(_reset)
@@ -702,13 +721,13 @@ async def cmd_ban(message: types.Message):
             cursor.execute(query, (user_id,))
             user = cursor.fetchone()
             if not user:
-                conn.close()
+                close_db_connection(conn)
                 return None
 
             update_q = "UPDATE users SET ban_end_time = %s WHERE user_id = %s" if DATABASE_URL else "UPDATE users SET ban_end_time = ? WHERE user_id = ?"
             cursor.execute(update_q, (ban_end, user_id))
             conn.commit()
-            conn.close()
+            close_db_connection(conn)
             return user
 
         user = await run_blocking(_ban)
@@ -747,7 +766,7 @@ async def cmd_stats(message: types.Message):
             query = "SELECT * FROM users WHERE user_id = %s" if DATABASE_URL else "SELECT * FROM users WHERE user_id = ?"
             cursor.execute(query, (user_id,))
             user = cursor.fetchone()
-            conn.close()
+            close_db_connection(conn)
             return user
 
         user = await run_blocking(_stats)
@@ -770,7 +789,6 @@ async def cmd_stats(message: types.Message):
             f"⚡ Энергия: {int(float(user[2]))}/{user[3]}\n"
             f"👆 Мульти-тап: Ур.{user[4]}\n"
             f"🔋 Энергия+: Ур.{user[5]}\n"
-            f"🤖 Авто-тап: Ур.{user[6]}\n"
             f"🎨 Золотой скин: {'Да' if user[7] else 'Нет'}\n"
             f"⛔ Бан: {ban_text}"
         )
@@ -795,7 +813,7 @@ async def cmd_broadcast(message: types.Message):
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM users")
             rows = cursor.fetchall()
-            conn.close()
+            close_db_connection(conn)
             return rows
 
         users = await run_blocking(_all_users)
@@ -923,9 +941,10 @@ async def start_web_server():
     app.add_routes(routes)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print("Веб-сервер запущен на порту 8080")
+    print(f"Веб-сервер запущен на порту {port}")
 
 
 async def main():
