@@ -9,7 +9,7 @@ from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
 
 # Токен бота - замени на свой (или используй переменную окружения для деплоя)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8510904775:AAEPqjsb2M3ckqzmnftrV_Ty5JcmMrAWDf4")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 # URL где будет хоститься веб-приложение
 WEBAPP_URL = os.getenv("WEBAPP_URL", "YOUR_WEBAPP_URL_HERE")  # например https://yourdomain.com
 # PostgreSQL URL (Render предоставит автоматически)
@@ -709,3 +709,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
