@@ -215,7 +215,7 @@ navLeaderboard.addEventListener('click', () => {
 
 // Покупка мульти-тапа
 buyMultitapBtn.addEventListener('click', () => {
-    const price = 100 * Math.pow(2, gameState.multi_tap_level - 1);
+    const price = 100 * Math.pow(1.2, gameState.multi_tap_level - 1);
     if (gameState.coins >= price) {
         gameState.coins -= price;
         gameState.multi_tap_level += 1;
@@ -302,4 +302,5 @@ async function loadLeaderboard() {
 
 // Инициализация при загрузке
 loadUserData();
+
 
