@@ -92,19 +92,19 @@ function updateUI() {
 // Обновление UI магазина
 function updateShopUI() {
     // Мульти-тап
-    const multitapPrice = 100 * Math.pow(1.2, gameState.multi_tap_level - 1);
+    const multitapPrice = Math.floor(100 * Math.pow(1.2, gameState.multi_tap_level - 1));
     document.getElementById('multitap-level').textContent = gameState.multi_tap_level;
     document.getElementById('multitap-price').textContent = multitapPrice;
     buyMultitapBtn.disabled = gameState.coins < multitapPrice;
     
     // Энергия+
-    const energyPrice = 200 * Math.pow(2, gameState.energy_level - 1);
+    const energyPrice = Math.floor(200 * Math.pow(1.2, gameState.energy_level - 1));
     document.getElementById('energy-level').textContent = gameState.energy_level;
     document.getElementById('energy-price').textContent = energyPrice;
     buyEnergyBtn.disabled = gameState.coins < energyPrice;
     
     // Авто-тап
-    const autotapPrice = gameState.auto_tap_level === 0 ? 500 : 500 * Math.pow(2, gameState.auto_tap_level);
+    const autotapPrice = Math.floor(gameState.auto_tap_level === 0 ? 500 : 500 * Math.pow(1.2, gameState.auto_tap_level));
     document.getElementById('autotap-level').textContent = gameState.auto_tap_level;
     document.getElementById('autotap-price').textContent = autotapPrice;
     buyAutotapBtn.disabled = gameState.coins < autotapPrice;
@@ -215,7 +215,7 @@ navLeaderboard.addEventListener('click', () => {
 
 // Покупка мульти-тапа
 buyMultitapBtn.addEventListener('click', () => {
-    const price = 100 * Math.pow(1.2, gameState.multi_tap_level - 1);
+    const price = Math.floor(100 * Math.pow(1.2, gameState.multi_tap_level - 1));
     if (gameState.coins >= price) {
         gameState.coins -= price;
         gameState.multi_tap_level += 1;
@@ -226,7 +226,7 @@ buyMultitapBtn.addEventListener('click', () => {
 
 // Покупка энергии+
 buyEnergyBtn.addEventListener('click', () => {
-    const price = 200 * Math.pow(2, gameState.energy_level - 1);
+    const price = Math.floor(200 * Math.pow(1.2, gameState.energy_level - 1));
     if (gameState.coins >= price) {
         gameState.coins -= price;
         gameState.energy_level += 1;
@@ -239,7 +239,7 @@ buyEnergyBtn.addEventListener('click', () => {
 
 // Покупка авто-тапа
 buyAutotapBtn.addEventListener('click', () => {
-    const price = gameState.auto_tap_level === 0 ? 500 : 500 * Math.pow(2, gameState.auto_tap_level);
+    const price = Math.floor(gameState.auto_tap_level === 0 ? 500 : 500 * Math.pow(1.2, gameState.auto_tap_level));
     if (gameState.coins >= price) {
         gameState.coins -= price;
         gameState.auto_tap_level += 1;
@@ -302,5 +302,6 @@ async function loadLeaderboard() {
 
 // Инициализация при загрузке
 loadUserData();
+
 
 
