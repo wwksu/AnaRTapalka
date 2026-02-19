@@ -14,11 +14,11 @@ let gameState = {
     max_energy: 1000,
     multi_tap_level: 1,
     energy_level: 1,
-    auto_tap_level: 0,
     skin_bought: false,
     last_update: Date.now(),
     ban_end_time: 0,
 };
+let userDataLoading = false;
 
 const coinsEl = document.getElementById("coins");
 const currentEnergyEl = document.getElementById("current-energy");
@@ -36,8 +36,11 @@ const navLeaderboard = document.getElementById("nav-leaderboard");
 
 const buyMultitapBtn = document.getElementById("buy-multitap");
 const buyEnergyBtn = document.getElementById("buy-energy");
-const buyAutotapBtn = document.getElementById("buy-autotap");
 const buySkinBtn = document.getElementById("buy-skin");
+const autoTapItemEl = document.getElementById("buy-autotap")?.closest(".shop-item");
+if (autoTapItemEl) {
+    autoTapItemEl.style.display = "none";
+}
 
 function apiHeaders() {
     const headers = { "Content-Type": "application/json" };
@@ -81,7 +84,6 @@ function showSetupError(message) {
     hamsterEl.style.pointerEvents = "none";
     buyMultitapBtn.disabled = true;
     buyEnergyBtn.disabled = true;
-    buyAutotapBtn.disabled = true;
     buySkinBtn.disabled = true;
 }
 
@@ -90,12 +92,21 @@ async function loadUserData() {
         showSetupError("Запускайте приложение только внутри Telegram WebApp");
         return;
     }
+    if (userDataLoading) {
+        return;
+    }
 
+    userDataLoading = true;
     try {
         const data = await apiGet(`/api/user/${encodeURIComponent(userId)}`);
         setGameState(data);
     } catch (error) {
         console.error("Ошибка загрузки данных:", error);
+        if (String(error.message || "").includes("401")) {
+            showSetupError("Сессия Telegram истекла. Перезапустите мини-приложение.");
+        }
+    } finally {
+        userDataLoading = false;
     }
 }
 
@@ -143,11 +154,6 @@ function updateShopUI() {
     document.getElementById("energy-level").textContent = gameState.energy_level;
     document.getElementById("energy-price").textContent = energyPrice;
     buyEnergyBtn.disabled = gameState.coins < energyPrice;
-
-    const autotapPrice = Math.floor(gameState.auto_tap_level === 0 ? 500 : 500 * Math.pow(1.2, gameState.auto_tap_level));
-    document.getElementById("autotap-level").textContent = gameState.auto_tap_level;
-    document.getElementById("autotap-price").textContent = autotapPrice;
-    buyAutotapBtn.disabled = gameState.coins < autotapPrice;
 
     const skinStatusEl = document.getElementById("skin-status");
     if (gameState.skin_bought) {
@@ -284,10 +290,6 @@ buyEnergyBtn.addEventListener("click", async () => {
     await performAction("buy_energy");
 });
 
-buyAutotapBtn.addEventListener("click", async () => {
-    await performAction("buy_autotap");
-});
-
 buySkinBtn.addEventListener("click", async () => {
     await performAction("buy_skin");
 });
@@ -351,7 +353,15 @@ async function loadLeaderboard() {
 }
 
 setInterval(() => {
-    loadUserData();
-}, 5000);
+    if (!document.hidden) {
+        loadUserData();
+    }
+}, 15000);
+
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+        loadUserData();
+    }
+});
 
 loadUserData();
