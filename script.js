@@ -164,16 +164,30 @@ hamsterEl.addEventListener('click', (e) => {
     if (gameState.energy < 1) return;
     if(!checkAutoClicker()){
         return;
-}
+    }
     
     // Уменьшаем энергию
     gameState.energy -= 1;
     
-    // Добавляем монеты (с учётом мульти-тапа)
-    gameState.coins += gameState.multi_tap_level;
+    // Проверка на комбо тап (5% шанс)
+    const isCombo = Math.random() < 0.05;
+    const multiplier = isCombo ? 4 : 1;
+    const coinsEarned = gameState.multi_tap_level * multiplier;
     
-    // Анимация +X
-    createTapAnimation(e, gameState.multi_tap_level);
+    // Добавляем монеты
+    gameState.coins += coinsEarned;
+    
+    // Анимация тапа (обычная или комбо)
+    if (isCombo) {
+        createComboAnimation(e, coinsEarned);
+        // Эффект на хомяке
+        hamsterEl.classList.add('combo-shake');
+        setTimeout(() => {
+            hamsterEl.classList.remove('combo-shake');
+        }, 500);
+    } else {
+        createTapAnimation(e, coinsEarned);
+    }
     
     // Обновляем UI
     updateUI();
@@ -199,6 +213,42 @@ function createTapAnimation(e, amount) {
     setTimeout(() => {
         animation.remove();
     }, 1000);
+}
+
+// Создание анимации комбо тапа
+function createComboAnimation(e, amount) {
+    const rect = hamsterEl.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    const animation = document.createElement('div');
+    animation.className = 'tap-animation combo-tap';
+    animation.innerHTML = `
+        <div class="combo-text">COMBO!</div>
+        <div class="combo-amount">+${amount}</div>
+    `;
+    animation.style.left = x + 'px';
+    animation.style.top = y + 'px';
+    
+    tapAnimationsEl.appendChild(animation);
+    
+    // Создаем частицы вокруг
+    for (let i = 0; i < 8; i++) {
+        const particle = document.createElement('div');
+        particle.className = 'combo-particle';
+        particle.style.left = x + 'px';
+        particle.style.top = y + 'px';
+        particle.style.setProperty('--angle', `${i * 45}deg`);
+        tapAnimationsEl.appendChild(particle);
+        
+        setTimeout(() => {
+            particle.remove();
+        }, 800);
+    }
+    
+    setTimeout(() => {
+        animation.remove();
+    }, 1500);
 }
 
 // Восстановление энергии (1 в секунду)
